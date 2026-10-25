@@ -1,5 +1,9 @@
 # dsh-memory
 
+[![release](https://img.shields.io/github/v/release/harm-m422/dsh-memory?label=release)](https://github.com/harm-m422/dsh-memory/releases/latest)
+[![download zip](https://img.shields.io/badge/download-zip-blue)](https://github.com/harm-m422/dsh-memory/releases/download/v1.0.0/dsh-memory-1.0.0.zip)
+[![license](https://img.shields.io/badge/license-MIT-green)](LICENSE)
+
 一个**带作用域的记忆体**，所有任务共用。它取代了 `dsh-diary`：不是把日记改名，而是换掉了
 "谁来都看同一页"的扁平模型。
 
@@ -125,6 +129,16 @@ API key 从 `DSH_MEMORY_API_KEY` 读，其次 `~/.dsh/memory/key`（0600）。
 **世界层的日志条目不会自动注入。** 只注入绑定到本会话的 topic/file 条目和本会话条目；
 否则全世界的旧日志又会在每个会话里漫出来，那就退回扁平的毛病了。世界条目用
 `memory_read` 查。
+
+## 下载
+
+不想走 git 的话，直接用打包好的 zip：
+
+**[dsh-memory-1.0.0.zip](https://github.com/harm-m422/dsh-memory/releases/download/v1.0.0/dsh-memory-1.0.0.zip)**
+
+解压后里面就是插件本体的 13 个文件，放法见下面「安装与生效」。
+文件大小与 SHA256 在 [Release 说明](https://github.com/harm-m422/dsh-memory/releases/tag/v1.0.0)里
+（不写在这里：README 本身在 zip 里，写死大小或 hash 会和 zip 互相依赖）。
 
 ## 安装与生效
 
