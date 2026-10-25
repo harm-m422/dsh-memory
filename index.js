@@ -41,7 +41,7 @@
 import { appendFileSync, chmodSync, existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
 import { createHash } from 'node:crypto'
 import { isSealed, open as openSealed, seal, KEY_PATH as VAULT_KEY_PATH } from './vault.js'
-import { organise, consolidate, converse, modelReady, readConfig, writeConfig, readStats, KEY_PATH, CONFIG_PATH, STATS_PATH, MODEL_FALLBACK } from './model.js'
+import { organise, consolidate, converse, extractSearchTerms, modelReady, readConfig, writeConfig, readStats, KEY_PATH, CONFIG_PATH, STATS_PATH, MODEL_FALLBACK } from './model.js'
 
 /** Cordis plugin name. */
 const name = 'dsh-memory'
@@ -763,6 +763,31 @@ function tierOfEntry(entry) {
  * Agent about to think; when it is missing (a non-agent assembly) only the world
  * facts are shown, which is still correct, just less specific.
  */
+/**
+ * Split a query into search tokens. A query is treated as a bag of words, not a
+ * phrase: "部署 失败" should recall an entry that says "deploy 超时" and another
+ * that says "只失败过一次", which a single substring test cannot do.
+ */
+function tokensOf(text) {
+  const parts = String(text ?? '')
+    .toLowerCase()
+    .split(/[\s,，、/|;；:：()（）"'`]+/)
+    .map((token) => token.trim())
+    .filter((token) => token.length >= 2)
+  const unique = [...new Set(parts)]
+  if (unique.length > 0) return unique
+  const whole = String(text ?? '').trim().toLowerCase()
+  return whole.length > 0 ? [whole] : []
+}
+
+/** How many distinct tokens occur in a haystack; higher is a better match. */
+function scoreOf(haystack, tokens) {
+  const hay = String(haystack ?? '').toLowerCase()
+  let score = 0
+  for (const token of tokens) if (hay.includes(token)) score += 1
+  return score
+}
+
 function memoryText(context) {
   const agent = context === undefined || context === null ? undefined : context.agent
   const sessionId = agent !== undefined && agent !== null && typeof agent.id === 'string' ? agent.id : ''
@@ -1301,11 +1326,20 @@ function apply(ctx) {
       let list = input.includeDeleted === true ? all : all.filter(isLive)
       if (scope.length > 0) list = list.filter((entry) => (entry.scope ?? 'world') === scope)
       if (typeof input.kind === 'string' && KINDS.includes(input.kind)) list = list.filter((entry) => entry.kind === input.kind)
-      const query = typeof input.query === 'string' ? input.query.trim().toLowerCase() : ''
-      if (query.length > 0) list = list.filter((entry) => (String(entry.text ?? '') + ' ' + String(entry.topic ?? '')).toLowerCase().includes(query))
+      const query = typeof input.query === 'string' ? input.query.trim() : ''
+      const tokens = query.length > 0 ? tokensOf(query) : []
+      let scored = null
+      if (tokens.length > 0) {
+        scored = list
+          .map((entry) => ({ entry, score: scoreOf(String(entry.text ?? '') + ' ' + String(entry.topic ?? ''), tokens) }))
+          .filter((item) => item.score > 0)
+        list = scored.map((item) => item.entry)
+      }
       if (list.length === 0) return '没有符合条件的记忆条目。'
       const limit = Math.min(100, Math.max(1, typeof input.limit === 'number' && Number.isFinite(input.limit) ? Math.floor(input.limit) : 15))
-      const recent = list.slice(-limit)
+      const recent = scored === null
+        ? list.slice(-limit)
+        : scored.sort((a, b) => b.score - a.score || (b.entry.id - a.entry.id)).slice(0, limit).map((item) => item.entry)
       if (scope.length > 0 && sessionId.length > 0) bind(sessionId, scope)
       return recent.map((entry) => {
         const where = (entry.scope ?? 'world')
@@ -1316,6 +1350,107 @@ function apply(ctx) {
       }).join('\n\n')
     }
   }), 'dsh-memory.read')
+
+  ctx.effect(() => ctx.tools.register({
+    name: 'memory_search',
+    description: 'Search memory from a vague question. The memory model turns the question into keywords and candidate topics, then the match happens locally across log entries and standing facts. Use it when you half-remember something but not the exact words or which scope holds it; use memory_read when you already know what to filter on.',
+    parameters: {
+      type: 'object',
+      properties: {
+        question: { type: 'string', description: 'The vague question in your own words, up to 500 characters.' },
+        limit: { type: 'integer', description: 'How many results per kind, 1-30. Defaults to 10.' },
+        includeFacts: { type: 'boolean', description: 'Also match standing facts by slot, title and text. Defaults to true.' }
+      },
+      required: ['question']
+    },
+    output: { schema: { type: 'string' }, render(_a, v) { return [{ type: 'text', text: String(v) }] } },
+    async execute(args, exec) {
+      const input = args ?? {}
+      const sessionId = sessionOf(exec)
+      const question = textField(input.question, 500)
+      if (question.length === 0) throw new Error('question is required')
+
+      // Candidate topics come from the data only, so the model cannot invent a scope.
+      const scopeSet = new Set()
+      for (const fact of readFacts()) scopeSet.add(fact.scope)
+      for (const entry of readEntries()) scopeSet.add(entry.scope ?? 'world')
+      const topics = [...scopeSet].filter((scope) => scope.startsWith('topic:')).sort()
+
+      let keywords = []
+      let chosen = []
+      let note = ''
+      if (modelReady()) {
+        try {
+          const terms = await extractSearchTerms({ question, topics })
+          keywords = terms.keywords
+          chosen = terms.topics
+          if (keywords.length === 0) note = '记忆模型没给出可用关键词，按原问题匹配'
+        } catch (error) {
+          note = '记忆模型调用失败，按原问题匹配：' + String((error && error.message) || error)
+        }
+      } else {
+        note = '记忆模型未配置，按原问题匹配'
+      }
+
+      const limit = Math.min(30, Math.max(1, typeof input.limit === 'number' && Number.isFinite(input.limit) ? Math.floor(input.limit) : 10))
+      const wantFacts = input.includeFacts !== false
+
+      const searchWith = (terms) => ({
+        facts: wantFacts
+          ? readFacts()
+            .map((fact) => ({
+              fact,
+              score: scoreOf(String(fact.slot) + ' ' + String(fact.doc.title ?? '') + ' ' + String(fact.doc.text ?? ''), terms)
+            }))
+            .filter((item) => item.score > 0)
+            .sort((a, b) => b.score - a.score)
+            .slice(0, limit)
+          : [],
+        entries: readEntries()
+          .filter(isLive)
+          .map((entry) => ({ entry, score: scoreOf(String(entry.text ?? '') + ' ' + String(entry.topic ?? ''), terms) }))
+          .filter((item) => item.score > 0)
+          .sort((a, b) => b.score - a.score || (b.entry.id - a.entry.id))
+          .slice(0, limit)
+      })
+
+      let tokens = keywords.length > 0 ? keywords : tokensOf(question)
+      let { facts: factHits, entries: entryHits } = searchWith(tokens)
+      // The model sometimes emits compounds that never appear verbatim. If nothing
+      // matched at all, retry with the question's own tokens before reporting nothing.
+      if (keywords.length > 0 && factHits.length === 0 && entryHits.length === 0) {
+        tokens = tokensOf(question)
+        const second = searchWith(tokens)
+        factHits = second.facts
+        entryHits = second.entries
+        note = (note.length > 0 ? note + '；' : '') + '模型的词没命中，改用原问题切词'
+      }
+
+      for (const scope of chosen) bind(sessionId, scope)
+
+      const parts = [
+        '关键词：' + tokens.join(' / ') + (chosen.length > 0 ? '　topic：' + chosen.join(', ') : '')
+          + (note.length > 0 ? '\n（' + note + '）' : ''),
+        '命中 ' + String(entryHits.length + factHits.length) + ' 条（日志 ' + String(entryHits.length) + '，档案 ' + String(factHits.length) + '）'
+      ]
+      if (factHits.length > 0) {
+        parts.push('', '【档案】')
+        for (const item of factHits) {
+          parts.push('[' + item.fact.scope + '/' + item.fact.slot + '] ' + String(item.fact.doc.title ?? item.fact.slot)
+            + '（命中 ' + String(item.score) + '）\n  ' + clip(oneLine(item.fact.doc.text), 240))
+        }
+      }
+      if (entryHits.length > 0) {
+        parts.push('', '【日志】')
+        for (const item of entryHits) {
+          parts.push('#' + String(item.entry.id) + ' [' + (item.entry.scope ?? 'world') + ']'
+            + (item.entry.topic ? ' ' + item.entry.topic : '') + '（命中 ' + String(item.score) + '）\n  ' + clip(oneLine(item.entry.text), 200))
+        }
+      }
+      if (entryHits.length === 0 && factHits.length === 0) parts.push('', '没有命中。')
+      return parts.join('\n')
+    }
+  }), 'dsh-memory.search')
 
   ctx.effect(() => ctx.tools.register({
     name: 'memory_forget',

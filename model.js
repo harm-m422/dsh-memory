@@ -271,6 +271,29 @@ const CONVERSE_SYSTEM = `你是这个 AI 的记忆管家，正在和一个真人
 {"reply":"你要说的话","change":{"action":"write","scope":"world|topic:名|file:路径","slot":"小写名","title":"显示名","text":"新正文","reason":"用户给的理由"},"needs_reason":false}`
 
 /**
+ * Run a call that must return JSON, retrying once with thinking forced off when the
+ * reply comes back as an empty body. That degeneration belongs to the endpoint, not
+ * to the prompt: the identical request with thinking off returns clean JSON, and we
+ * measured it happening on more than half of the large-digest calls.
+ */
+async function chatJson(system, user, options) {
+  const kind = options !== undefined && typeof options.kind === 'string' ? options.kind : 'chat'
+  const first = await chat(system, user, options)
+  let parsed = extractJson(first.content)
+  let content = first.content
+  let usage = first.usage
+  let elapsed = first.elapsed
+  if (parsed === null && String(content).trim().length === 0) {
+    const retry = await chat(system, user, { ...options, kind: kind + ':retry', forceThinkingDisabled: true })
+    parsed = extractJson(retry.content)
+    content = retry.content
+    usage = retry.usage
+    elapsed += retry.elapsed
+  }
+  return { parsed, content, usage, elapsed }
+}
+
+/**
  * Turn one turn's digest into level-1 notes.
  * @returns `{ notes, hide, why, usage, elapsed }`, defensively shaped.
  */
@@ -279,8 +302,7 @@ export async function organise(input) {
     ? '（无）'
     : input.existing.map((entry) => '#' + entry.id + ' [' + (entry.topic || '无题') + '] ' + entry.text).join('\n')
   const user = ['作用域：' + input.scope, '', '已有记忆：', existing, '', '主模型这一轮做了什么：', input.summary].join('\n')
-  const { content, usage, elapsed } = await chat(ORGANISE_SYSTEM, user, { kind: 'organise' })
-  const parsed = extractJson(content)
+  const { parsed, content, usage, elapsed } = await chatJson(ORGANISE_SYSTEM, user, { kind: 'organise' })
   if (parsed === null) return { notes: [], hide: [], why: '整理器没有返回可解析的 JSON', usage, elapsed, raw: content.slice(0, 400) }
   const notes = Array.isArray(parsed.notes)
     ? parsed.notes
@@ -305,8 +327,7 @@ export async function consolidate(input) {
     ? '（无）'
     : input.existing.map((doc) => '· ' + doc.slot + '：' + doc.text).join('\n\n')
   const user = ['作用域：' + input.scope, '', '已有重要记忆：', existing, '', '新情况：', input.text].join('\n')
-  const { content, usage, elapsed } = await chat(CONSOLIDATE_SYSTEM, user, { kind: 'consolidate' })
-  const parsed = extractJson(content)
+  const { parsed, content, usage, elapsed } = await chatJson(CONSOLIDATE_SYSTEM, user, { kind: 'consolidate' })
   if (parsed === null) throw new Error('整理器没有返回可解析的 JSON：' + content.slice(0, 200))
   return {
     title: typeof parsed.title === 'string' ? parsed.title.trim().slice(0, 40) : '',
@@ -394,4 +415,41 @@ export async function converse(input) {
     blocked: reason.length === 0 && (parsed.needs_reason === true || proposed !== null),
     elapsed
   }
+}
+
+const SEARCH_SYSTEM = `你在为一个记忆库做检索前端。用户问一句话，你把它变成能命中库里记录的关键词。
+
+规则：
+- 给 3~8 个关键词，要覆盖同义词、别名、中英文两种写法、可能的缩写
+  （例如同一个东西：配置 / config / 设置；部署 / deploy / 上线）。
+- 每个关键词只写一个词，不要拼复合词：写「部署」「失败」，不要写「部署失败」，
+  因为匹配是逐词子串比对，拼起来反而搜不到。
+- 丢掉虚词："记忆""有没有""什么""那个""之前"这类一律不要。
+- topics 只能从给定的清单里挑，最多 3 个；拿不准就给空数组。
+- 不要解释，不要客套。
+
+只输出 JSON：
+{"keywords":["..."],"topics":["topic:xxx"]}`
+
+/**
+ * Turn a vague question into search terms. The model only proposes conditions —
+ * the matching itself stays local, so a wrong guess costs a wasted search, never
+ * a wrong answer. Topics are validated against the offered list so the model
+ * cannot invent a scope that does not exist.
+ */
+export async function extractSearchTerms(input) {
+  const topics = input.topics.length === 0 ? '（无）' : input.topics.join('\n')
+  const user = ['库里现有的 topic：', topics, '', '用户的问题：', input.question].join('\n')
+  const { parsed, elapsed } = await chatJson(SEARCH_SYSTEM, user, { kind: 'search', timeoutMs: 30000 })
+  const keywords = parsed !== null && Array.isArray(parsed.keywords)
+    ? parsed.keywords
+      .filter((word) => typeof word === 'string' && word.trim().length > 0)
+      .map((word) => word.trim().slice(0, 32))
+      .slice(0, 8)
+    : []
+  const offered = new Set(input.topics)
+  const picked = parsed !== null && Array.isArray(parsed.topics)
+    ? parsed.topics.filter((topic) => typeof topic === 'string' && offered.has(topic.trim())).map((topic) => topic.trim()).slice(0, 3)
+    : []
+  return { keywords: [...new Set(keywords)], topics: [...new Set(picked)], elapsed }
 }
