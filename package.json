@@ -1,0 +1,45 @@
+{
+  "name": "dsh-memory",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "A scoped memory model shared by every agent: world facts, topic lines, file work records, and the current session's direction.",
+  "license": "MIT",
+  "author": "harm-m422",
+  "homepage": "https://github.com/harm-m422/dsh-memory#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/harm-m422/dsh-memory.git"
+  },
+  "bugs": {
+    "url": "https://github.com/harm-m422/dsh-memory/issues"
+  },
+  "icon": "./icon.svg",
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./model": "./model.js",
+    "./package.json": "./package.json",
+    "./locale/*.json": "./locale/*.json"
+  },
+  "files": [
+    "index.js",
+    "model.js",
+    "client.js",
+    "vault.js",
+    "cordis.patch.yml",
+    "README.md",
+    "LICENSE",
+    "NOTICE",
+    "icon.svg",
+    "locale/*.json"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web"
+    }
+  }
+}

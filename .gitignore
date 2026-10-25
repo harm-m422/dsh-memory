@@ -1,0 +1,15 @@
+# Dependencies / build output
+node_modules/
+*.tgz
+
+# Distribution archives produced by hand
+*.zip
+
+# Editor and OS noise
+.DS_Store
+Thumbs.db
+.~lock.*
+*.log
+
+# Local runtime state — the plugin keeps this under $DSH_HOME/diary/, never here
+data/

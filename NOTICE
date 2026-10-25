@@ -1,0 +1,23 @@
+dsh-memory
+Copyright (c) 2026 harm-m422
+Licensed under the MIT License — see LICENSE.
+
+Third-party attribution
+=======================
+
+This plugin runs inside DeepSeek Harness (DSH) and builds on its public
+extension points: tool registration, prompt sections/contexts, and the web
+server's route and auth fence.
+
+DeepSeek Harness
+  Copyright (c) 2026 DeepSeek
+  Licensed under the MIT License
+  Distribution: the npm packages `@deepseek-ai/dsh`, `@deepseek-ai/dsh-tools`,
+  `@deepseek-ai/dsh-agent` and related `@deepseek-ai/dsh-*` packages.
+
+The MIT license text of DeepSeek Harness is identical to the LICENSE file in
+this repository, with the copyright line above as its notice. Where this
+repository quotes DSH source (for example the `assembleContextFor` snippet in
+README.md) it does so for documentation, under that same MIT grant.
+
+Files in `locale/` are original translations made for this plugin.

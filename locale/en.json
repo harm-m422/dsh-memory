@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Memory",
+    "description": "Scoped memory for every agent: world facts, topic lines, per-file work records, and this session's direction — assembled per session."
+  }
+}
