@@ -8,7 +8,7 @@
 // Everything here is fail-soft. Memory is an optimisation, not a dependency: if
 // the endpoint is down, slow, or returns prose instead of JSON, the caller keeps
 // working and the failure is reported rather than thrown into the turn.
-import { chmodSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs'
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 
 const HOME = process.env.DSH_HOME ?? ((process.env.HOME ?? '.') + '/.dsh')
 const ENDPOINT = 'https://api.deepseek.com/chat/completions'
@@ -32,55 +32,6 @@ function apiKey() {
 /** Whether a memory model can be reached at all. */
 export function modelReady() {
   return apiKey().length > 0
-}
-
-/** Where the key actually comes from, so the panel can say which one wins. */
-export function keySource() {
-  const fromEnv = process.env.DSH_MEMORY_API_KEY
-  if (typeof fromEnv === 'string' && fromEnv.trim().length > 0) return 'env'
-  try {
-    return readFileSync(KEY_FILE, 'utf8').trim().length > 0 ? 'file' : ''
-  } catch {
-    return ''
-  }
-}
-
-/**
- * Strip and sanity-check a pasted key. Whitespace is rejected rather than
- * trimmed away in the middle: a token with a stray newline produces a header
- * the endpoint answers with 401, which reads like a wrong key instead of a
- * broken paste.
- */
-function cleanKey(value) {
-  if (typeof value !== 'string') return ''
-  const key = value.trim()
-  if (key.length === 0 || key.length > 200) return ''
-  if (/[\s\u0000-\u001f\u007f]/.test(key)) return ''
-  return key
-}
-
-/**
- * Persist a key next to the data. Written 0600 at creation and chmod'ed after,
- * because an existing file keeps its old mode and a world-readable secret is
- * worse than no convenience at all.
- */
-export function writeKey(value) {
-  const key = cleanKey(value)
-  if (key.length === 0) throw new Error('key is empty or contains whitespace')
-  mkdirSync(HOME + '/memory', { recursive: true })
-  writeFileSync(KEY_FILE, key + '\n', { encoding: 'utf8', mode: 0o600 })
-  chmodSync(KEY_FILE, 0o600)
-  return { source: keySource() }
-}
-
-/** Forget the stored key. A DSH_MEMORY_API_KEY in the environment still applies. */
-export function clearKey() {
-  try {
-    unlinkSync(KEY_FILE)
-  } catch {
-    // nothing stored: clearing twice is not an error
-  }
-  return { source: keySource() }
 }
 
 export const KEY_PATH = KEY_FILE

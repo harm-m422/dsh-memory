@@ -1,9 +1,5 @@
 # dsh-memory
 
-[![release](https://img.shields.io/github/v/release/harm-m422/dsh-memory?label=release)](https://github.com/harm-m422/dsh-memory/releases/latest)
-[![download zip](https://img.shields.io/badge/download-zip-blue)](https://github.com/harm-m422/dsh-memory/releases/download/v1.1.0/dsh-memory-1.1.0.zip)
-[![license](https://img.shields.io/badge/license-MIT-green)](LICENSE)
-
 一个**带作用域的记忆体**，所有任务共用。它取代了 `dsh-diary`：不是把日记改名，而是换掉了
 "谁来都看同一页"的扁平模型。
 
@@ -111,8 +107,7 @@ OpenAI 协议）。主模型只管干活和汇报。
 `model.js` 是那个客户端，整个设计是**软失败**的：接口不可用、超时、返回散文而不是 JSON，
 都不抛进这一轮，只报告「这轮没整理」。记忆是优化，不是依赖。
 
-API key 从 `DSH_MEMORY_API_KEY` 读，其次 `~/.dsh/memory/key`（0600）。后者不用手动写 ——
-设置 → 记忆 → 记忆模型 里有输入框，保存即落盘。
+API key 从 `DSH_MEMORY_API_KEY` 读，其次 `~/.dsh/memory/key`（0600）。
 
 ## 分层与作用域是两个轴
 
@@ -131,50 +126,17 @@ API key 从 `DSH_MEMORY_API_KEY` 读，其次 `~/.dsh/memory/key`（0600）。�
 否则全世界的旧日志又会在每个会话里漫出来，那就退回扁平的毛病了。世界条目用
 `memory_read` 查。
 
-## 下载
-
-不想走 git 的话，直接用打包好的 zip：
-
-**[dsh-memory-1.1.0.zip](https://github.com/harm-m422/dsh-memory/releases/download/v1.1.0/dsh-memory-1.1.0.zip)**
-
-解压后里面就是插件本体的 13 个文件，放法见下面「安装与生效」。
-文件大小与 SHA256 在 [Release 说明](https://github.com/harm-m422/dsh-memory/releases/tag/v1.1.0)里
-（不写在这里：README 本身在 zip 里，写死大小或 hash 会和 zip 互相依赖）。
-
 ## 安装与生效
 
 包在 `~/.dsh/profiles/web/node_modules/dsh-memory/`，`cordis.patch.yml` 里一行
 id 为 `memory` 的 insert。**新包名 = 新模块 URL = 不重启也能挂上**（实测：加行后
 `/dsh-memory/state` 立刻从 404 变 401）。改已加载包的 `index.js` 仍然必须重启。
 
-手工装（不需要 pnpm）：
-
-```bash
-git clone https://github.com/harm-m422/dsh-memory.git
-cp -a dsh-memory ~/.dsh/profiles/web/node_modules/dsh-memory
-cat >> ~/.dsh/profiles/web/cordis.patch.yml <<'EOF'
-- insert:
-    - id: memory
-      name: dsh-memory
-EOF
-```
-
-数据落在 `$DSH_HOME/diary/`（沿用 dsh-diary 的老目录，升级没有迁移步骤）。设置 → **记忆**
-是面板入口。记忆模型要一个 API key，三种给法（优先级从高到低）：
-
-1. 环境变量 `export DSH_MEMORY_API_KEY=...` —— 存在时面板里存的值不生效，面板会明说
-2. 面板 **设置 → 记忆 → 记忆模型 → API key** 填一个点保存 —— 直接写 `~/.dsh/memory/key`（0600）
-3. 手动 `printf '%s\n' 'sk-...' > ~/.dsh/memory/key && chmod 600 ~/.dsh/memory/key`
-
-不给也能用，只是这一轮不会被整理。
-
-
 ## 设置页（面板）
 
 设置 → **记忆**（大脑图标）。四块：
 
-1. **记忆模型** —— 改模型 id、思考三态（自动 / 强制开 / 关），以及 **API key**
-   （保存即写 `~/.dsh/memory/key`，0600；可一键清除）。实测这个接口的
+1. **记忆模型** —— 改模型 id、思考三态（自动 / 强制开 / 关）。实测这个接口的
    `reasoning_effort` 基本无效，`thinking: {type}` 看起来能压掉推理，所以只给三态，不给骗人的档位。
 2. **每轮耗时** —— 平均毫秒、总调用次数、最近一次，并按类型拆分（一级整理 / 二级整理 / 面板对话 / 失败）。
 3. **接入记忆框架的档** —— 作用域数、事实数、日志数、会话数，默认折叠，展开看每个作用域的明细。
@@ -190,12 +152,13 @@ EOF
 > 注：`/dsh-memory` 是前缀路由且先过鉴权，所以**从外部无法用 404/401 判断某个子路径是否存在**——
 > 只要插件挂着，任何 `/dsh-memory/*` 都先 401。验证面板只能真的打开页面看。
 
-## 许可
+## API key 的读写边界
 
-MIT，见 [LICENSE](LICENSE)。版权人 harm-m422。
+`POST /dsh-memory/key { key }`：写入 `~/.dsh/memory/key`（`mode: 0o600` + `chmod`），
+空字符串则删除该文件；不足 8 字符返回 400。
 
-这个插件运行在 **DeepSeek Harness** 里，用的是它的公开扩展点（工具注册、提示词段与
-prompt context、web server 路由与鉴权）；DSH 本身也是 MIT（Copyright (c) 2026 DeepSeek）。
-README 里引用的 `assembleContextFor` 片段属于 DSH 源码，按同一份 MIT 授权引用。第三方出处
-见 [NOTICE](NOTICE)。
+**只写不读。** 响应只有 `{ keySet, keyFromEnv }`，`/panel` 也只回 `keySet` 和路径，
+任何接口都不会把 key 吐出来。`apiKey()` 每次调用读文件、不缓存，所以保存后立刻生效。
 
+环境变量 `DSH_MEMORY_API_KEY` 优先级高于文件；`/panel` 用 `keyFromEnv` 把这件事告诉页面，
+免得"保存了但没效果"变成一个谜。

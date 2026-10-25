@@ -38,10 +38,10 @@
 // contexts are scanned for `{{variable}}` references and `PromptContext` has no
 // `interpolate: false` opt-out, so a stray `{{` in remembered text would throw
 // during assembly and break every request in the process.
-import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
+import { appendFileSync, chmodSync, existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
 import { createHash } from 'node:crypto'
 import { isSealed, open as openSealed, seal, KEY_PATH as VAULT_KEY_PATH } from './vault.js'
-import { organise, consolidate, converse, modelReady, readConfig, writeConfig, readStats, writeKey, clearKey, keySource, KEY_PATH, CONFIG_PATH, STATS_PATH, MODEL_FALLBACK } from './model.js'
+import { organise, consolidate, converse, modelReady, readConfig, writeConfig, readStats, KEY_PATH, CONFIG_PATH, STATS_PATH, MODEL_FALLBACK } from './model.js'
 
 /** Cordis plugin name. */
 const name = 'dsh-memory'
@@ -1049,7 +1049,7 @@ async function handle(ctx, req, res) {
       config: readConfig(),
       modelDefault: MODEL_FALLBACK,
       keySet: modelReady(),
-      keySource: keySource(),
+      keyFromEnv: typeof process.env.DSH_MEMORY_API_KEY === 'string' && process.env.DSH_MEMORY_API_KEY.trim().length > 0,
       keyPath: KEY_PATH,
       configPath: CONFIG_PATH,
       statsPath: STATS_PATH,
@@ -1075,35 +1075,39 @@ async function handle(ctx, req, res) {
     return
   }
 
-  if (req.method === 'POST' && path === PREFIX + '/config') {
+  // The key is writable from the UI but never readable through it: this route
+  // accepts one and reports only whether one is configured. An empty string
+  // removes the stored key. The environment variable still wins over the file,
+  // which /panel reports as keyFromEnv so the page can say why saving looks inert.
+  if (req.method === 'POST' && path === PREFIX + '/key') {
     const body = await readBody(req)
-    send(res, 200, { config: writeConfig(body) })
+    const raw = typeof body.key === 'string' ? body.key.trim() : ''
+    try {
+      if (raw.length === 0) {
+        if (existsSync(KEY_PATH)) unlinkSync(KEY_PATH)
+      } else {
+        if (raw.length < 8) {
+          send(res, 400, { error: 'key 太短，不像有效的 API key' })
+          return
+        }
+        mkdirSync(KEY_PATH.slice(0, KEY_PATH.lastIndexOf('/')), { recursive: true })
+        writeFileSync(KEY_PATH, raw + '\n', { mode: 0o600 })
+        chmodSync(KEY_PATH, 0o600)
+      }
+    } catch (error) {
+      send(res, 500, { error: String((error && error.message) || error) })
+      return
+    }
+    send(res, 200, {
+      keySet: modelReady(),
+      keyFromEnv: typeof process.env.DSH_MEMORY_API_KEY === 'string' && process.env.DSH_MEMORY_API_KEY.trim().length > 0
+    })
     return
   }
 
-  // The key is set through its own route rather than through /config: it never
-  // travels back out in a response, and clearing has to be an explicit request
-  // so a malformed body cannot silently delete it.
-  if (req.method === 'POST' && path === PREFIX + '/key') {
-    const body = await readBody(req, 4 * 1024)
-    const clear = body.clear === true
-    const raw = typeof body.key === 'string' ? body.key : ''
-    if (!clear && raw.trim().length === 0) {
-      send(res, 400, { error: 'key required', keySet: modelReady(), keySource: keySource() })
-      return
-    }
-    try {
-      if (clear) clearKey()
-      else writeKey(raw)
-    } catch (error) {
-      send(res, 400, {
-        error: String((error && error.message) || error),
-        keySet: modelReady(),
-        keySource: keySource()
-      })
-      return
-    }
-    send(res, 200, { keySet: modelReady(), keySource: keySource(), keyPath: KEY_PATH })
+  if (req.method === 'POST' && path === PREFIX + '/config') {
+    const body = await readBody(req)
+    send(res, 200, { config: writeConfig(body) })
     return
   }
 

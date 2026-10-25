@@ -203,9 +203,6 @@ window.__ModuleLoader__.load({
 			var draftState = React.useState("");
 			var draft = draftState[0];
 			var setDraft = draftState[1];
-			var keyState = React.useState("");
-			var keyDraft = keyState[0];
-			var setKeyDraft = keyState[1];
 			var busyState = React.useState(false);
 			var busy = busyState[0];
 			var setBusy = busyState[1];
@@ -213,6 +210,11 @@ window.__ModuleLoader__.load({
 			var askingReason = askState[0];
 			var setAskingReason = askState[1];
 			var reasonState = React.useState("");
+			// The key is never rendered back: the field starts empty and only ever
+			// holds what the person just typed.
+			var keyDraftState = React.useState("");
+			var keyDraft = keyDraftState[0];
+			var setKeyDraft = keyDraftState[1];
 			var reason = reasonState[0];
 			var setReason = reasonState[1];
 
@@ -246,25 +248,36 @@ window.__ModuleLoader__.load({
 				});
 			}
 
-			function saveKey(value, clear) {
-				var key = String(value || "").trim();
-				if (!clear && key.length === 0) return Promise.resolve();
-				setNote(clear ? "清除中…" : "保存中…");
-				return post("/key", clear ? { clear: true } : { key: key }).then(function (result) {
-					if (!result.ok) {
-						setNote("保存失败：" + ((result.body && result.body.error) || result.status));
-						return;
-					}
+			function saveKey() {
+				var value = String(keyDraft || "").trim();
+				if (value.length === 0) { setNote("没有输入新的 key"); return; }
+				setNote("保存 key…");
+				post("/key", { key: value }).then(function (result) {
+					if (!result.ok) { setNote(result.status === 404 ? "宿主还没加载 /dsh-memory/key——需要重启一次 harness" : "保存失败：" + (result.body.error || result.status)); return; }
 					setKeyDraft("");
 					setPanel(function (previous) {
 						return previous === null ? previous : Object.assign({}, previous, {
-							keySet: result.body.keySet,
-							keySource: result.body.keySource
+							keySet: result.body.keySet === true,
+							keyFromEnv: result.body.keyFromEnv === true
 						});
 					});
-					setNote(clear ? "已清除" : "已保存");
+					setNote(result.body.keySet ? "key 已保存" : "key 未生效");
 				}).catch(function (error) {
 					setNote("保存失败：" + String((error && error.message) || error));
+				});
+			}
+
+			function clearKey() {
+				setNote("清除 key…");
+				post("/key", { key: "" }).then(function (result) {
+					if (!result.ok) { setNote(result.status === 404 ? "宿主还没加载 /dsh-memory/key——需要重启一次 harness" : "清除失败：" + (result.body.error || result.status)); return; }
+					setKeyDraft("");
+					setPanel(function (previous) {
+						return previous === null ? previous : Object.assign({}, previous, { keySet: result.body.keySet === true });
+					});
+					setNote("key 已清除");
+				}).catch(function (error) {
+					setNote("清除失败：" + String((error && error.message) || error));
 				});
 			}
 
@@ -355,37 +368,27 @@ window.__ModuleLoader__.load({
 							h("option", { value: "auto" }, "自动（接口默认）"),
 							h("option", { value: "enabled" }, "强制开启"),
 							h("option", { value: "disabled" }, "关闭"))),
-					h("div", { style: { display: "flex", gap: 8, alignItems: "center", marginBottom: 8, flexWrap: "wrap" } },
+					h(Muted, null,
+						"实测这个接口：reasoning_effort 基本无效，thinking:{type} 看起来能压掉推理，所以只给三态，不给骗人的档位。"),
+					h("div", { style: { display: "flex", gap: 8, alignItems: "center", marginTop: 8, flexWrap: "wrap" } },
 						h("span", { style: { fontSize: 12, color: DIM, minWidth: 64 } }, "API key"),
 						h("input", {
 							type: "password",
-							value: keyDraft,
-							placeholder: panel.keySet ? "已配置，填入新值可替换" : "sk-…",
 							autoComplete: "off",
-							spellCheck: false,
+							value: keyDraft,
+							placeholder: panel.keySet ? "已配置，留空不改" : "sk-…",
 							onChange: function (event) { setKeyDraft(event.target.value); },
-							onKeyDown: function (event) {
-								if (event.key === "Enter" && keyDraft.trim().length > 0) saveKey(keyDraft, false);
-							},
+							onKeyDown: function (event) { if (event.key === "Enter") saveKey(); },
 							style: Object.assign({}, inputStyle, { width: 260 })
 						}),
-						h("button", {
-							type: "button",
-							onClick: function () { saveKey(keyDraft, false); },
-							disabled: keyDraft.trim().length === 0,
-							style: buttonStyle
-						}, "保存"),
-						panel.keySet
-							? h("button", { type: "button", onClick: function () { saveKey("", true); }, style: buttonStyle }, "清除")
-							: null),
+						h("button", { onClick: saveKey, style: buttonStyle }, "保存"),
+						panel.keySet ? h("button", { onClick: clearKey, style: buttonStyle }, "清除") : null),
 					h(Muted, null,
-						"实测这个接口：reasoning_effort 基本无效，thinking:{type} 看起来能压掉推理，所以只给三态，不给骗人的档位。",
-						h("br", null),
-						panel.keySource === "env"
-							? "API key 来自环境变量 DSH_MEMORY_API_KEY，它优先于文件——这里保存的值会被环境变量盖住。"
+						panel.keyFromEnv
+							? "环境变量 DSH_MEMORY_API_KEY 已设置，它优先于这里保存的值。"
 							: panel.keySet
-								? "API key 已保存在 " + panel.keyPath + "（0600）。"
-								: "还没有 API key。在上面填一个，或写进 " + panel.keyPath + "。")),
+								? "已配置 · " + panel.keyPath + "（权限 600，只写不读）"
+								: "未配置 · 保存后写入 " + panel.keyPath)),
 
 				h(Section, { title: "每轮耗时" },
 					h("div", { style: { fontSize: 22, fontWeight: 600, letterSpacing: -0.3 } },
