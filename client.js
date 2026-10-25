@@ -203,6 +203,9 @@ window.__ModuleLoader__.load({
 			var draftState = React.useState("");
 			var draft = draftState[0];
 			var setDraft = draftState[1];
+			var keyState = React.useState("");
+			var keyDraft = keyState[0];
+			var setKeyDraft = keyState[1];
 			var busyState = React.useState(false);
 			var busy = busyState[0];
 			var setBusy = busyState[1];
@@ -238,6 +241,28 @@ window.__ModuleLoader__.load({
 						return previous === null ? previous : Object.assign({}, previous, { config: result.body.config });
 					});
 					setNote("已保存");
+				}).catch(function (error) {
+					setNote("保存失败：" + String((error && error.message) || error));
+				});
+			}
+
+			function saveKey(value, clear) {
+				var key = String(value || "").trim();
+				if (!clear && key.length === 0) return Promise.resolve();
+				setNote(clear ? "清除中…" : "保存中…");
+				return post("/key", clear ? { clear: true } : { key: key }).then(function (result) {
+					if (!result.ok) {
+						setNote("保存失败：" + ((result.body && result.body.error) || result.status));
+						return;
+					}
+					setKeyDraft("");
+					setPanel(function (previous) {
+						return previous === null ? previous : Object.assign({}, previous, {
+							keySet: result.body.keySet,
+							keySource: result.body.keySource
+						});
+					});
+					setNote(clear ? "已清除" : "已保存");
 				}).catch(function (error) {
 					setNote("保存失败：" + String((error && error.message) || error));
 				});
@@ -330,10 +355,37 @@ window.__ModuleLoader__.load({
 							h("option", { value: "auto" }, "自动（接口默认）"),
 							h("option", { value: "enabled" }, "强制开启"),
 							h("option", { value: "disabled" }, "关闭"))),
+					h("div", { style: { display: "flex", gap: 8, alignItems: "center", marginBottom: 8, flexWrap: "wrap" } },
+						h("span", { style: { fontSize: 12, color: DIM, minWidth: 64 } }, "API key"),
+						h("input", {
+							type: "password",
+							value: keyDraft,
+							placeholder: panel.keySet ? "已配置，填入新值可替换" : "sk-…",
+							autoComplete: "off",
+							spellCheck: false,
+							onChange: function (event) { setKeyDraft(event.target.value); },
+							onKeyDown: function (event) {
+								if (event.key === "Enter" && keyDraft.trim().length > 0) saveKey(keyDraft, false);
+							},
+							style: Object.assign({}, inputStyle, { width: 260 })
+						}),
+						h("button", {
+							type: "button",
+							onClick: function () { saveKey(keyDraft, false); },
+							disabled: keyDraft.trim().length === 0,
+							style: buttonStyle
+						}, "保存"),
+						panel.keySet
+							? h("button", { type: "button", onClick: function () { saveKey("", true); }, style: buttonStyle }, "清除")
+							: null),
 					h(Muted, null,
 						"实测这个接口：reasoning_effort 基本无效，thinking:{type} 看起来能压掉推理，所以只给三态，不给骗人的档位。",
 						h("br", null),
-						panel.keySet ? "API key 已配置：" + panel.keyPath : "缺少 API key，写入 " + panel.keyPath)),
+						panel.keySource === "env"
+							? "API key 来自环境变量 DSH_MEMORY_API_KEY，它优先于文件——这里保存的值会被环境变量盖住。"
+							: panel.keySet
+								? "API key 已保存在 " + panel.keyPath + "（0600）。"
+								: "还没有 API key。在上面填一个，或写进 " + panel.keyPath + "。")),
 
 				h(Section, { title: "每轮耗时" },
 					h("div", { style: { fontSize: 22, fontWeight: 600, letterSpacing: -0.3 } },

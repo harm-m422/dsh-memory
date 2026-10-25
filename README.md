@@ -1,7 +1,7 @@
 # dsh-memory
 
 [![release](https://img.shields.io/github/v/release/harm-m422/dsh-memory?label=release)](https://github.com/harm-m422/dsh-memory/releases/latest)
-[![download zip](https://img.shields.io/badge/download-zip-blue)](https://github.com/harm-m422/dsh-memory/releases/download/v1.0.0/dsh-memory-1.0.0.zip)
+[![download zip](https://img.shields.io/badge/download-zip-blue)](https://github.com/harm-m422/dsh-memory/releases/download/v1.1.0/dsh-memory-1.1.0.zip)
 [![license](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
 一个**带作用域的记忆体**，所有任务共用。它取代了 `dsh-diary`：不是把日记改名，而是换掉了
@@ -111,7 +111,8 @@ OpenAI 协议）。主模型只管干活和汇报。
 `model.js` 是那个客户端，整个设计是**软失败**的：接口不可用、超时、返回散文而不是 JSON，
 都不抛进这一轮，只报告「这轮没整理」。记忆是优化，不是依赖。
 
-API key 从 `DSH_MEMORY_API_KEY` 读，其次 `~/.dsh/memory/key`（0600）。
+API key 从 `DSH_MEMORY_API_KEY` 读，其次 `~/.dsh/memory/key`（0600）。后者不用手动写 ——
+设置 → 记忆 → 记忆模型 里有输入框，保存即落盘。
 
 ## 分层与作用域是两个轴
 
@@ -134,10 +135,10 @@ API key 从 `DSH_MEMORY_API_KEY` 读，其次 `~/.dsh/memory/key`（0600）。
 
 不想走 git 的话，直接用打包好的 zip：
 
-**[dsh-memory-1.0.0.zip](https://github.com/harm-m422/dsh-memory/releases/download/v1.0.0/dsh-memory-1.0.0.zip)**
+**[dsh-memory-1.1.0.zip](https://github.com/harm-m422/dsh-memory/releases/download/v1.1.0/dsh-memory-1.1.0.zip)**
 
 解压后里面就是插件本体的 13 个文件，放法见下面「安装与生效」。
-文件大小与 SHA256 在 [Release 说明](https://github.com/harm-m422/dsh-memory/releases/tag/v1.0.0)里
+文件大小与 SHA256 在 [Release 说明](https://github.com/harm-m422/dsh-memory/releases/tag/v1.1.0)里
 （不写在这里：README 本身在 zip 里，写死大小或 hash 会和 zip 互相依赖）。
 
 ## 安装与生效
@@ -159,15 +160,21 @@ EOF
 ```
 
 数据落在 `$DSH_HOME/diary/`（沿用 dsh-diary 的老目录，升级没有迁移步骤）。设置 → **记忆**
-是面板入口。记忆模型要一个 API key：`export DSH_MEMORY_API_KEY=...`，或写进
-`~/.dsh/memory/key`（0600）。不给也能用，只是这一轮不会被整理。
+是面板入口。记忆模型要一个 API key，三种给法（优先级从高到低）：
+
+1. 环境变量 `export DSH_MEMORY_API_KEY=...` —— 存在时面板里存的值不生效，面板会明说
+2. 面板 **设置 → 记忆 → 记忆模型 → API key** 填一个点保存 —— 直接写 `~/.dsh/memory/key`（0600）
+3. 手动 `printf '%s\n' 'sk-...' > ~/.dsh/memory/key && chmod 600 ~/.dsh/memory/key`
+
+不给也能用，只是这一轮不会被整理。
 
 
 ## 设置页（面板）
 
 设置 → **记忆**（大脑图标）。四块：
 
-1. **记忆模型** —— 改模型 id、思考三态（自动 / 强制开 / 关）。实测这个接口的
+1. **记忆模型** —— 改模型 id、思考三态（自动 / 强制开 / 关），以及 **API key**
+   （保存即写 `~/.dsh/memory/key`，0600；可一键清除）。实测这个接口的
    `reasoning_effort` 基本无效，`thinking: {type}` 看起来能压掉推理，所以只给三态，不给骗人的档位。
 2. **每轮耗时** —— 平均毫秒、总调用次数、最近一次，并按类型拆分（一级整理 / 二级整理 / 面板对话 / 失败）。
 3. **接入记忆框架的档** —— 作用域数、事实数、日志数、会话数，默认折叠，展开看每个作用域的明细。
