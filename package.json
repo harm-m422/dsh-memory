@@ -1,6 +1,6 @@
 {
   "name": "dsh-memory",
-  "version": "1.3.1",
+  "version": "1.3.4",
   "private": true,
   "type": "module",
   "description": "A scoped memory model shared by every agent: world facts, topic lines, file work records, and the current session's direction.",
@@ -26,13 +26,13 @@
     "index.js",
     "model.js",
     "client.js",
-    "vault.js",
     "cordis.patch.yml",
     "README.md",
-    "LICENSE",
-    "NOTICE",
     "icon.svg",
-    "locale/*.json"
+    "locale/*.json",
+    "vault.js",
+    "LICENSE",
+    "NOTICE"
   ],
   "dsh": {
     "bundle": {

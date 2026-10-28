@@ -788,6 +788,46 @@ function scoreOf(haystack, tokens) {
   return score
 }
 
+/**
+ * Scopes present in a result set that this session is NOT bound to.
+ *
+ * Being able to find a record is not permission to act on it: a maintenance
+ * session that happens to hold a security note should ask whether the question
+ * landed in the wrong place, not quietly finish the other team's job.
+ */
+function outOfScope(sessionId, scopes) {
+  if (sessionId.length === 0) return []
+  const bound = new Set(scopesFor(sessionId))
+  const own = 'session:' + sessionId
+  return [...new Set(scopes)].filter((scope) => scope !== 'world' && scope !== own && !bound.has(scope))
+}
+
+/** Entry topics that read as an outstanding item. */
+const PENDING = /待办|未做|未完成|还没|TODO|todo|pending/
+
+/**
+ * At most a ten-character nudge that this session's own line has something open.
+ * The point is not to carry the detail across — it is to stop a person from
+ * believing a requirement was finished when it was only written down.
+ */
+function pendingHint(sessionId, entries) {
+  if (sessionId.length === 0) return null
+  const bound = new Set(scopesFor(sessionId))
+  const open = entries.filter((entry) => isLive(entry)
+    && bound.has(entry.scope ?? 'world')
+    && PENDING.test(String(entry.topic ?? '')))
+  if (open.length === 0) return null
+  return '· 还有 ' + String(open.length) + ' 项待办'
+}
+
+/** The one-line warning that turns a silent cross-scope grab into a question. */
+function crossScopeWarning(sessionId, scopes) {
+  const crossed = outOfScope(sessionId, scopes)
+  if (crossed.length === 0) return ''
+  return '⚠ 跨档：以下命中来自「' + crossed.map(scopeLabel).join('」「')
+    + '」，不属于本会话绑定的档。先问用户是不是问错了档；确认要跨档之后再继续。\n\n'
+}
+
 function memoryText(context) {
   const agent = context === undefined || context === null ? undefined : context.agent
   const sessionId = agent !== undefined && agent !== null && typeof agent.id === 'string' ? agent.id : ''
@@ -818,7 +858,7 @@ function memoryText(context) {
       if (tierOfFact(fact) !== tier || !factVisible(fact.scope)) continue
       const where = fact.scope === 'world' ? '' : scopeLabel(fact.scope) + ' '
       const room = tier === 'persona' ? WORLD_LINE : SCOPE_LINE
-      lines.push('· ' + where + String(fact.doc.title ?? fact.slot) + '：' + oneLine(clip(fact.doc.text, room)))
+      lines.push('· ' + where + (fact.slot === 'charter' ? '只管' : String(fact.doc.title ?? fact.slot)) + '：' + oneLine(clip(fact.doc.text, room)))
     }
     if (tier === 'note' || tier === 'ephemeral') {
       let quoted = 0
@@ -855,6 +895,9 @@ function memoryText(context) {
   // once, so it knows how much is already written down that it has not asked for.
   const catalog = staleCatalog(sessionId, entries)
   if (catalog !== null) blocks.push(catalog)
+
+  const waiting = pendingHint(sessionId, entries)
+  if (waiting !== null) blocks.push(waiting)
 
   const contribution = writeStateText(sessionId)
   if (contribution !== null) blocks.push(contribution)
@@ -1210,6 +1253,15 @@ function sealExisting() {
 }
 
 function apply(ctx) {
+  // Sign into the shared engine table so a second memory engine can notice us.
+  // Registered through ctx.effect so unloading the plugin REMOVES the signature:
+  // a stale row makes the other engine keep believing we are still running.
+  ctx.effect(() => {
+    const key = Symbol.for('dsh.memory.engines')
+    if (globalThis[key] === undefined) globalThis[key] = {}
+    globalThis[key]['dsh-memory'] = { kind: 'memory', version: '1.1.1', at: Date.now() }
+    return () => { delete globalThis[key]['dsh-memory'] }
+  }, 'dsh-memory.handshake')
   mkdirSync(DIR, { recursive: true })
   sealExisting()
 
@@ -1231,7 +1283,9 @@ function apply(ctx) {
       '· 遇到决定性结论、硬教训、或方向改变，用 memory_promote 让它深度整理成二级记忆；日常进展不要用它。',
       '· 如果记忆块出现「本会话：尚未写入过记忆」，这一轮必须写入至少一条（memory_write / memory_fact / memory_promote 都算）。',
       '· 如果记忆块列出某个档「从未写入」或「距上次写入超过 48 小时」，这一轮必须为它写入一条。确实无内容可记时，说明为什么，不要用填充条目凑数。',
-      '· 两步都是软失败：记忆模型不可用时照常回答，但要说明这一轮没有整理，不要假装记下了。'
+      '· 两步都是软失败：记忆模型不可用时照常回答，但要说明这一轮没有整理，不要假装记下了。',
+      '· 每个档只管自己的范围（见「只管」那行）。能查到别的档的记忆，不代表这一轮该管那件事。',
+      '· 任何工具结果带「⚠ 跨档」时，先问用户一句是不是问错了档；用户确认要跨档，才继续做，不要自顾自接手。'
     ].join('\n')
   }), 'dsh-memory.pipeline')
 
@@ -1314,7 +1368,8 @@ function apply(ctx) {
         limit: { type: 'integer', description: 'How many of the newest matches, 1-100. Defaults to 15.' },
         kind: { type: 'string', enum: KINDS, description: 'Only this kind.' },
         query: { type: 'string', description: 'Only entries whose text or topic contains this text, case-insensitive.' },
-        includeDeleted: { type: 'boolean', description: 'Also return forgotten entries. Off by default; use it to recover something removed by mistake.' }
+        includeDeleted: { type: 'boolean', description: 'Also return forgotten entries. Off by default; use it to recover something removed by mistake.' },
+        adopt: { type: 'boolean', description: 'Bind this scope to the session. Defaults to false: merely reading another scope must not make it part of what this session is responsible for. Set it only after the user confirms they mean to cross over.' }
       }
     },
     output: { schema: { type: 'string' }, render(_a, v) { return [{ type: 'text', text: String(v) }] } },
@@ -1340,8 +1395,11 @@ function apply(ctx) {
       const recent = scored === null
         ? list.slice(-limit)
         : scored.sort((a, b) => b.score - a.score || (b.entry.id - a.entry.id)).slice(0, limit).map((item) => item.entry)
-      if (scope.length > 0 && sessionId.length > 0) bind(sessionId, scope)
-      return recent.map((entry) => {
+      // Reading across a boundary must NOT enrol the session in that scope. The
+      // warning asks the user first; only `adopt` (or an actual write) binds.
+      const readWarning = crossScopeWarning(sessionId, recent.map((entry) => entry.scope ?? 'world'))
+      if (scope.length > 0 && sessionId.length > 0 && input.adopt === true) bind(sessionId, scope)
+      return readWarning + recent.map((entry) => {
         const where = (entry.scope ?? 'world')
         return '#' + String(entry.id) + ' [' + (KIND_LABEL[entry.kind] ?? '备忘') + '] ' + where + ' ' + String(entry.author ?? '匿名') + ' ' + stamp(entry.at)
           + (entry.topic ? ' · ' + entry.topic : '')
@@ -1359,7 +1417,8 @@ function apply(ctx) {
       properties: {
         question: { type: 'string', description: 'The vague question in your own words, up to 500 characters.' },
         limit: { type: 'integer', description: 'How many results per kind, 1-30. Defaults to 10.' },
-        includeFacts: { type: 'boolean', description: 'Also match standing facts by slot, title and text. Defaults to true.' }
+        includeFacts: { type: 'boolean', description: 'Also match standing facts by slot, title and text. Defaults to true.' },
+        adopt: { type: 'boolean', description: 'Bind the topics this search selected to the current session. Defaults to false: finding a record in another scope must not silently widen what this session is responsible for. Set it only after the user confirms they really mean to cross over.' }
       },
       required: ['question']
     },
@@ -1426,10 +1485,18 @@ function apply(ctx) {
         note = (note.length > 0 ? note + '；' : '') + '模型的词没命中，改用原问题切词'
       }
 
-      for (const scope of chosen) bind(sessionId, scope)
+      // Adopting a topic is now explicit: a bare search must not silently widen what
+      // this session is responsible for. `adopt` is how the user says "yes, cross over".
+      if (input.adopt === true) for (const scope of chosen) bind(sessionId, scope)
+
+      const warning = crossScopeWarning(sessionId, [
+        ...entryHits.map((item) => item.entry.scope ?? 'world'),
+        ...factHits.map((item) => item.fact.scope)
+      ])
 
       const parts = [
-        '关键词：' + tokens.join(' / ') + (chosen.length > 0 ? '　topic：' + chosen.join(', ') : '')
+        (warning.length > 0 ? warning.trim() + '\n' : '')
+          + '关键词：' + tokens.join(' / ') + (chosen.length > 0 ? '　topic：' + chosen.join(', ') : '')
           + (note.length > 0 ? '\n（' + note + '）' : ''),
         '命中 ' + String(entryHits.length + factHits.length) + ' 条（日志 ' + String(entryHits.length) + '，档案 ' + String(factHits.length) + '）'
       ]
@@ -1529,7 +1596,8 @@ function apply(ctx) {
         const scope = rawScope === '' ? '' : normaliseScope(rawScope, sessionId)
         const picked = facts.filter((fact) => (scope === '' || fact.scope === scope) && (slot === '' || fact.slot === slot))
         if (picked.length === 0) return facts.length === 0 ? '记忆还是空的。用 memory_fact action=write 写下第一条。' : '没有符合条件的档案。'
-        if (scope !== '' && sessionId.length > 0) bind(sessionId, scope)
+        // Reading a fact is not a commitment: only writes bind. Otherwise looking
+        // one thing up would quietly widen this session's scope for ever after.
         return picked.map((fact) => '[' + fact.scope + '/' + fact.slot + '] ' + String(fact.doc.title ?? fact.slot)
           + ' · ' + String(fact.doc.by ?? '匿名') + ' ' + stamp(fact.doc.updatedAt)
           + '\n' + String(fact.doc.text)).join('\n\n')
