@@ -386,7 +386,9 @@ window.__ModuleLoader__.load({
 					h(Muted, null,
 						panel.keyFromEnv
 							? "环境变量 DSH_MEMORY_API_KEY 已设置，它优先于这里保存的值。"
-							: panel.keySet
+							: panel.harnessModel === true
+								? "借用 harness 默认模型（无需 key）· 想指定就填一把覆盖"
+								: panel.keySet
 								? "已配置 · " + panel.keyPath + "（权限 600，只写不读）"
 								: "未配置 · 保存后写入 " + panel.keyPath)),
 

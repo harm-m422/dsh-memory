@@ -8,13 +8,27 @@
 // Everything here is fail-soft. Memory is an optimisation, not a dependency: if
 // the endpoint is down, slow, or returns prose instead of JSON, the caller keeps
 // working and the failure is reported rather than thrown into the turn.
+import { join } from 'node:path'
+import { homedir } from 'node:os'
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 
-const HOME = process.env.DSH_HOME ?? ((process.env.HOME ?? '.') + '/.dsh')
+/**
+ * The harness's own model handle, injected by the host plugin. When no API key is
+ * configured we borrow the harness's credentials instead of asking the user for a
+ * second key — the harness is already logged in.
+ */
+let harnessLlm = null
+
+/** Wire the harness model in; passing null restores the "must have a key" behaviour. */
+export function useHarnessLlm(llm) {
+  harnessLlm = llm ?? null
+}
+
+const HOME = process.env.DSH_HOME ?? join(homedir(), '.dsh')
 const ENDPOINT = 'https://api.deepseek.com/chat/completions'
 /** Verified against api.deepseek.com: this id resolves to DeepSeek-V4.1-Flash. */
 const MODEL_DEFAULT = 'deepseek-flash'
-const KEY_FILE = HOME + '/memory/key'
+const KEY_FILE = join(HOME, 'memory', 'key')
 const CONFIG_FILE = HOME + '/memory/config.json'
 const STATS_FILE = HOME + '/memory/stats.json'
 
@@ -31,7 +45,12 @@ function apiKey() {
 
 /** Whether a memory model can be reached at all. */
 export function modelReady() {
-  return apiKey().length > 0
+  return apiKey().length > 0 || harnessLlm !== null
+}
+
+/** True when the harness model is what we would use (no key configured). */
+export function usesHarnessModel() {
+  return apiKey().length === 0 && harnessLlm !== null
 }
 
 export const KEY_PATH = KEY_FILE
@@ -121,13 +140,42 @@ function recordStat(kind, ms) {
  * JSON when that parameter is rejected. `kind` names the counter bucket so the
  * panel can show what each part of the pipeline actually costs.
  */
+/**
+ * Borrow the harness's model. Same messages, no key: the credentials belong to the
+ * harness, not to us. maxTokens is generous on purpose — an undersized budget is
+ * consumed by reasoning and returns an empty body that still looks successful.
+ */
+async function chatViaHarness(system, user, options) {
+  const started = Date.now()
+  const said = []
+  for await (const chunk of harnessLlm.stream({
+    provider: 'deepseek-official',
+    model: readConfig().model || MODEL_DEFAULT,
+    messages: [{ role: 'user', content: [{ type: 'text', text: system + '\n\n' + user }] }],
+    maxTokens: 4000
+  })) {
+    if (chunk !== null && typeof chunk === 'object' && chunk.type === 'text-delta') said.push(String(chunk.text ?? ''))
+  }
+  const elapsed = Date.now() - started
+  const content = said.join('')
+  if (content.trim().length === 0) {
+    recordStat((options.kind ?? 'chat') + ':error', elapsed)
+    throw new Error('harness model returned an empty body')
+  }
+  recordStat(options.kind ?? 'chat', elapsed)
+  return { content, usage: null, elapsed }
+}
+
 async function chat(system, user, options) {
   const settings = readConfig()
   const timeoutMs = options !== undefined && typeof options.timeoutMs === 'number' ? options.timeoutMs : 30000
   const json = options === undefined || options.json !== false
   const kind = options !== undefined && typeof options.kind === 'string' ? options.kind : 'chat'
   const key = apiKey()
-  if (key.length === 0) throw new Error('memory model key missing: put it in ' + KEY_FILE + ' or DSH_MEMORY_API_KEY')
+  if (key.length === 0) {
+    if (harnessLlm === null) throw new Error('memory model not configured: no key at ' + KEY_FILE + ', DSH_MEMORY_API_KEY, and no harness model')
+    return chatViaHarness(system, user, { kind, timeoutMs })
+  }
 
   const body = {
     model: settings.model,

@@ -38,18 +38,25 @@
 // contexts are scanned for `{{variable}}` references and `PromptContext` has no
 // `interpolate: false` opt-out, so a stray `{{` in remembered text would throw
 // during assembly and break every request in the process.
+
+/** chmod 是 POSIX 语义；Windows 上可能抛 EPERM，所以做成尽力而为。 */
+function safeChmod(target, mode) {
+  try { chmodSync(target, mode) } catch { /* 平台不适用就当成功 */ }
+}
+import { join } from 'node:path'
+import { homedir } from 'node:os'
 import { appendFileSync, chmodSync, existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
 import { createHash } from 'node:crypto'
 import { isSealed, open as openSealed, seal, KEY_PATH as VAULT_KEY_PATH } from './vault.js'
-import { organise, consolidate, converse, extractSearchTerms, modelReady, readConfig, writeConfig, readStats, KEY_PATH, CONFIG_PATH, STATS_PATH, MODEL_FALLBACK } from './model.js'
+import { organise, consolidate, converse, extractSearchTerms, useHarnessLlm, usesHarnessModel, modelReady, readConfig, writeConfig, readStats, KEY_PATH, CONFIG_PATH, STATS_PATH, MODEL_FALLBACK } from './model.js'
 
 /** Cordis plugin name. */
 const name = 'dsh-memory'
 /** Services this row needs: tools, prompt segments, and the web carrier. */
-const inject = ['tools', 'systemPrompt', 'connection', 'webServer']
+const inject = ['tools', 'systemPrompt', 'connection', 'webServer', 'llm']
 
 // Reuse the dsh-diary directory: same bytes, new model.
-const HOME = process.env.DSH_HOME ?? ((process.env.HOME ?? '.') + '/.dsh')
+const HOME = process.env.DSH_HOME ?? join(homedir(), '.dsh')
 const DIR = HOME + '/diary'
 const FACTS = DIR + '/profiles.json'
 const ENTRIES = DIR + '/entries.jsonl'
@@ -154,7 +161,8 @@ function scopeLabel(scope) {
   if (scope.startsWith('session:')) return '这次对话'
   if (scope.startsWith('file:')) {
     const path = scope.slice(5)
-    const parts = path.split('/').filter(Boolean)
+    // Windows 用反斜杠，作用域解析两种分隔符都要认
+    const parts = path.split(/[\\/]/).filter(Boolean)
     return '文件 ' + parts.slice(-2).join('/')
   }
   return scope
@@ -1117,6 +1125,7 @@ async function handle(ctx, req, res) {
       config: readConfig(),
       modelDefault: MODEL_FALLBACK,
       keySet: modelReady(),
+      harnessModel: usesHarnessModel(),
       keyFromEnv: typeof process.env.DSH_MEMORY_API_KEY === 'string' && process.env.DSH_MEMORY_API_KEY.trim().length > 0,
       keyPath: KEY_PATH,
       configPath: CONFIG_PATH,
@@ -1160,7 +1169,7 @@ async function handle(ctx, req, res) {
         }
         mkdirSync(KEY_PATH.slice(0, KEY_PATH.lastIndexOf('/')), { recursive: true })
         writeFileSync(KEY_PATH, raw + '\n', { mode: 0o600 })
-        chmodSync(KEY_PATH, 0o600)
+        safeChmod(KEY_PATH, 0o600)
       }
     } catch (error) {
       send(res, 500, { error: String((error && error.message) || error) })
@@ -1253,6 +1262,8 @@ function sealExisting() {
 }
 
 function apply(ctx) {
+  // 没有自己的 key 时借用 harness 的模型：harness 已经登录好了
+  try { useHarnessLlm(ctx.get('llm') ?? null) } catch { useHarnessLlm(null) }
   // Sign into the shared engine table so a second memory engine can notice us.
   // Registered through ctx.effect so unloading the plugin REMOVES the signature:
   // a stale row makes the other engine keep believing we are still running.

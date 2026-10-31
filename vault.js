@@ -15,10 +15,17 @@
 // The key lives beside the data at ~/.dsh/memory/master.key (0600). That is
 // deliberate: a key the plugin cannot reach is a key that cannot decrypt, and the
 // point is hygiene rather than a boundary against a co-resident process.
+
+/** chmod 是 POSIX 语义；Windows 上可能抛 EPERM，所以做成尽力而为。 */
+function safeChmod(target, mode) {
+  try { chmodSync(target, mode) } catch { /* 平台不适用就当成功 */ }
+}
+import { join } from 'node:path'
+import { homedir } from 'node:os'
 import { createCipheriv, createDecipheriv, randomBytes } from 'node:crypto'
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 
-const HOME = process.env.DSH_HOME ?? ((process.env.HOME ?? '.') + '/.dsh')
+const HOME = process.env.DSH_HOME ?? join(homedir(), '.dsh')
 const DIR = HOME + '/memory'
 const KEY_FILE = DIR + '/master.key'
 const VERSION = 1
@@ -43,7 +50,7 @@ function masterKey() {
   try {
     mkdirSync(DIR, { recursive: true })
     writeFileSync(KEY_FILE, cached.toString('base64') + '\n', { mode: 0o600 })
-    chmodSync(KEY_FILE, 0o600)
+    safeChmod(KEY_FILE, 0o600)
   } catch {
     // An unwritable key file still works for this process's lifetime.
   }
