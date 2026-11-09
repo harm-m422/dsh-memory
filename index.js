@@ -128,6 +128,22 @@ function stamp(iso) {
 // ── scopes ────────────────────────────────────────────────────────────────────
 
 /**
+ * Scope for a WRITE. Unlike `normaliseScope`, an omitted scope is an error rather
+ * than an implicit `world`: defaulting a write to world is what lets one line of
+ * work leak into every session's context, so it has to be explicit at the call
+ * site. Reads keep the lenient path — reading everything is not a contamination.
+ */
+function writeScope(raw, sessionId, toolName) {
+  const value = typeof raw === 'string' ? raw.trim() : ''
+  if (value === '') {
+    throw new Error(toolName + ' needs an explicit scope: use topic:name for a line of work, '
+      + 'file:path for one file, session:current for this conversation, or world only when the '
+      + 'note is genuinely for every session. Omitting it no longer defaults to world.')
+  }
+  return normaliseScope(value, sessionId)
+}
+
+/**
  * Normalise a caller-supplied scope. A bare word is a topic, because that is what
  * an agent will naturally type.
  */
@@ -1336,7 +1352,7 @@ function apply(ctx) {
         },
         scope: {
           type: 'string',
-          description: 'Where this belongs. topic:name = one line of work, seen only by sessions inside that line. file:path = that file. session:current = this conversation only. world = shared: the newest ' + String(WORLD_ENTRIES) + ' world entries ride along in every session and older ones stay reachable through memory_read. Defaults to world; prefer a topic or session scope for anything specific.'
+          description: 'Required. Where this belongs. topic:name = one line of work, seen only by sessions inside that line. file:path = that file. session:current = this conversation only. world = shared: the newest ' + String(WORLD_ENTRIES) + ' world entries ride along in every session, so use it only for something genuinely useful to every session. There is no default; pick the narrowest scope that fits.'
         },
         kind: {
           type: 'string',
@@ -1353,7 +1369,7 @@ function apply(ctx) {
           description: 'Optional key, up to 200 characters. When set, this entry can only be changed by a reason equal to it — the host compares it, the model never recognises it. Only a hash is stored, so the key cannot be recovered: keep it somewhere. Omit for ordinary memory, where the model judges the reason itself.'
         }
       },
-      required: ['text']
+      required: ['text', 'scope']
     },
     output: { schema: { type: 'string' }, render(_a, v) { return [{ type: 'text', text: String(v) }] } },
     async execute(args, exec) {
@@ -1361,7 +1377,7 @@ function apply(ctx) {
       const input = args ?? {}
       const text = textField(input.text, MAX_TEXT)
       if (text.length === 0) throw new Error('text is required and must not be empty')
-      const scope = normaliseScope(input.scope, sessionId)
+      const scope = writeScope(input.scope, sessionId, 'memory_write')
       const entry = appendEntry({
         author: authorOf(exec, input.as),
         kind: kindField(input.kind),
@@ -1662,11 +1678,11 @@ function apply(ctx) {
         },
         scope: {
           type: 'string',
-          description: 'Which line this turn belongs to: topic:name, file:path, or session:current. Defaults to world.'
+          description: 'Required. Which line this turn belongs to: topic:name, file:path, or session:current. Use world only when the report is genuinely relevant to every session, because world notes are injected into unrelated sessions.'
         },
         as: { type: 'string', description: 'Optional display name for yourself.' }
       },
-      required: ['summary']
+      required: ['summary', 'scope']
     },
     output: { schema: { type: 'string' }, render(_a, v) { return [{ type: 'text', text: String(v) }] } },
     async execute(args, exec) {
@@ -1675,7 +1691,7 @@ function apply(ctx) {
       const summary = textField(input.summary, 3000)
       if (summary.length === 0) throw new Error('summary is required')
       if (!modelReady()) return '记忆模型未配置（缺少 ' + KEY_PATH + '），这一轮没有整理。'
-      const scope = normaliseScope(input.scope, sessionId)
+      const scope = writeScope(input.scope, sessionId, 'memory_report')
       const existing = readEntries()
         .filter((entry) => isLive(entry) && (entry.scope ?? 'world') === scope)
         .slice(-8)
@@ -1733,7 +1749,7 @@ function apply(ctx) {
         },
         scope: {
           type: 'string',
-          description: 'Which line it belongs to: topic:name or file:path. Defaults to world.'
+          description: 'Required. Which line it belongs to: topic:name, file:path, or session:current. Use world only for a conclusion every session should carry.'
         },
         slot: {
           type: 'string',
@@ -1741,7 +1757,7 @@ function apply(ctx) {
         },
         as: { type: 'string', description: 'Optional display name for yourself.' }
       },
-      required: ['text']
+      required: ['text', 'scope']
     },
     output: { schema: { type: 'string' }, render(_a, v) { return [{ type: 'text', text: String(v) }] } },
     async execute(args, exec) {
@@ -1750,7 +1766,7 @@ function apply(ctx) {
       const text = textField(input.text, 3000)
       if (text.length === 0) throw new Error('text is required')
       if (!modelReady()) return '记忆模型未配置（缺少 ' + KEY_PATH + '），没有整理。'
-      const scope = normaliseScope(input.scope, sessionId)
+      const scope = writeScope(input.scope, sessionId, 'memory_promote')
       const existing = readFacts()
         .filter((fact) => fact.scope === scope && tierOfFact(fact) === 'deep')
         .map((fact) => ({ slot: fact.slot, text: fact.doc.text }))
