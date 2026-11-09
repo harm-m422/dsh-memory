@@ -47,7 +47,7 @@ import { join } from 'node:path'
 import { homedir } from 'node:os'
 import { appendFileSync, chmodSync, existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
 import { createHash } from 'node:crypto'
-import { isSealed, open as openSealed, seal, KEY_PATH as VAULT_KEY_PATH } from './vault.js'
+import { isSealed, open as openSealed, seal, KEY_PATH as VAULT_KEY_PATH, VaultKeyError } from './vault.js'
 import { organise, consolidate, converse, extractSearchTerms, useHarnessLlm, usesHarnessModel, modelReady, readConfig, writeConfig, readStats, KEY_PATH, CONFIG_PATH, STATS_PATH, MODEL_FALLBACK } from './model.js'
 
 /** Cordis plugin name. */
@@ -126,6 +126,22 @@ function stamp(iso) {
 }
 
 // ── scopes ────────────────────────────────────────────────────────────────────
+
+/**
+ * Scope for a WRITE. Unlike `normaliseScope`, an omitted scope is an error rather
+ * than an implicit `world`: defaulting a write to world is what lets one line of
+ * work leak into every session's context, so it has to be explicit at the call
+ * site. Reads keep the lenient path — reading everything is not a contamination.
+ */
+function writeScope(raw, sessionId, toolName) {
+  const value = typeof raw === 'string' ? raw.trim() : ''
+  if (value === '') {
+    throw new Error(toolName + ' needs an explicit scope: use topic:name for a line of work, '
+      + 'file:path for one file, session:current for this conversation, or world only when the '
+      + 'note is genuinely for every session. Omitting it no longer defaults to world.')
+  }
+  return normaliseScope(value, sessionId)
+}
 
 /**
  * Normalise a caller-supplied scope. A bare word is a topic, because that is what
@@ -214,7 +230,10 @@ function readEntries() {
       }
       if (typeof parsed.text === 'string') entries.push(parsed)
       else unreadableLines.push(trimmed)
-    } catch {
+    } catch (error) {
+      // A damaged master key is not a damaged line: surface it, or the caller
+      // would treat every record as tamper and quietly keep writing new ones.
+      if (error instanceof VaultKeyError) throw error
       // A half-written last line, or a tampered one: preserved, not deleted.
       unreadableLines.push(trimmed)
     }
@@ -1251,12 +1270,17 @@ function sealExisting() {
       // Every line unreadable: leave the file completely alone (serializeEntries
       // would reproduce it byte for byte anyway, so no write happens).
     }
-  } catch {
+  } catch (error) {
+    // A damaged master key must not be mistaken for a failed migration: keep
+    // the reason so the host reports a key problem instead of silently
+    // continuing with a vault it cannot open.
+    if (error instanceof VaultKeyError) throw error
     // A failed migration leaves plaintext in place; the next write seals it.
   }
   try {
     if (existsSync(FACTS)) writeFacts(factMap())
-  } catch {
+  } catch (error) {
+    if (error instanceof VaultKeyError) throw error
     // Same: nothing is lost, the next write seals it.
   }
 }
@@ -1328,7 +1352,7 @@ function apply(ctx) {
         },
         scope: {
           type: 'string',
-          description: 'Where this belongs. topic:name = one line of work, seen only by sessions inside that line. file:path = that file. session:current = this conversation only. world = shared: the newest ' + String(WORLD_ENTRIES) + ' world entries ride along in every session and older ones stay reachable through memory_read. Defaults to world; prefer a topic or session scope for anything specific.'
+          description: 'Required. Where this belongs. topic:name = one line of work, seen only by sessions inside that line. file:path = that file. session:current = this conversation only. world = shared: the newest ' + String(WORLD_ENTRIES) + ' world entries ride along in every session, so use it only for something genuinely useful to every session. There is no default; pick the narrowest scope that fits.'
         },
         kind: {
           type: 'string',
@@ -1345,7 +1369,7 @@ function apply(ctx) {
           description: 'Optional key, up to 200 characters. When set, this entry can only be changed by a reason equal to it — the host compares it, the model never recognises it. Only a hash is stored, so the key cannot be recovered: keep it somewhere. Omit for ordinary memory, where the model judges the reason itself.'
         }
       },
-      required: ['text']
+      required: ['text', 'scope']
     },
     output: { schema: { type: 'string' }, render(_a, v) { return [{ type: 'text', text: String(v) }] } },
     async execute(args, exec) {
@@ -1353,7 +1377,7 @@ function apply(ctx) {
       const input = args ?? {}
       const text = textField(input.text, MAX_TEXT)
       if (text.length === 0) throw new Error('text is required and must not be empty')
-      const scope = normaliseScope(input.scope, sessionId)
+      const scope = writeScope(input.scope, sessionId, 'memory_write')
       const entry = appendEntry({
         author: authorOf(exec, input.as),
         kind: kindField(input.kind),
@@ -1654,11 +1678,11 @@ function apply(ctx) {
         },
         scope: {
           type: 'string',
-          description: 'Which line this turn belongs to: topic:name, file:path, or session:current. Defaults to world.'
+          description: 'Required. Which line this turn belongs to: topic:name, file:path, or session:current. Use world only when the report is genuinely relevant to every session, because world notes are injected into unrelated sessions.'
         },
         as: { type: 'string', description: 'Optional display name for yourself.' }
       },
-      required: ['summary']
+      required: ['summary', 'scope']
     },
     output: { schema: { type: 'string' }, render(_a, v) { return [{ type: 'text', text: String(v) }] } },
     async execute(args, exec) {
@@ -1667,7 +1691,7 @@ function apply(ctx) {
       const summary = textField(input.summary, 3000)
       if (summary.length === 0) throw new Error('summary is required')
       if (!modelReady()) return '记忆模型未配置（缺少 ' + KEY_PATH + '），这一轮没有整理。'
-      const scope = normaliseScope(input.scope, sessionId)
+      const scope = writeScope(input.scope, sessionId, 'memory_report')
       const existing = readEntries()
         .filter((entry) => isLive(entry) && (entry.scope ?? 'world') === scope)
         .slice(-8)
@@ -1693,7 +1717,11 @@ function apply(ctx) {
       }
       let hidden = 0
       if (organised.hide.length > 0) {
-        const doomed = new Set(organised.hide)
+        // Only IDs inside the scope being reported may be hidden: an ID from another
+        // scope is out of bounds, but a same-scope entry older than the 8-entry
+        // window is still a legitimate merge/consolidation target.
+        const inScope = new Set(readEntries().filter((e) => isLive(e) && (e.scope ?? 'world') === scope).map((e) => e.id))
+        const doomed = new Set(organised.hide.filter((id) => inScope.has(id)))
         const before = readEntries()
         const now = new Date().toISOString()
         const after = before.map((entry) => (doomed.has(entry.id) && isLive(entry) ? { ...entry, deletedAt: now } : entry))
@@ -1721,7 +1749,7 @@ function apply(ctx) {
         },
         scope: {
           type: 'string',
-          description: 'Which line it belongs to: topic:name or file:path. Defaults to world.'
+          description: 'Required. Which line it belongs to: topic:name, file:path, or session:current. Use world only for a conclusion every session should carry.'
         },
         slot: {
           type: 'string',
@@ -1729,7 +1757,7 @@ function apply(ctx) {
         },
         as: { type: 'string', description: 'Optional display name for yourself.' }
       },
-      required: ['text']
+      required: ['text', 'scope']
     },
     output: { schema: { type: 'string' }, render(_a, v) { return [{ type: 'text', text: String(v) }] } },
     async execute(args, exec) {
@@ -1738,7 +1766,7 @@ function apply(ctx) {
       const text = textField(input.text, 3000)
       if (text.length === 0) throw new Error('text is required')
       if (!modelReady()) return '记忆模型未配置（缺少 ' + KEY_PATH + '），没有整理。'
-      const scope = normaliseScope(input.scope, sessionId)
+      const scope = writeScope(input.scope, sessionId, 'memory_promote')
       const existing = readFacts()
         .filter((fact) => fact.scope === scope && tierOfFact(fact) === 'deep')
         .map((fact) => ({ slot: fact.slot, text: fact.doc.text }))
