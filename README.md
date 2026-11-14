@@ -77,7 +77,7 @@ $DSH_HOME/diary/state.json         # { lastId: n } —— id 下限，删了也�
 日志 `id` 由进程内单调计数器发放，下限落盘。删掉 #15 之后下一条是 #16，不是 #15——
 否则对话里那些 "#12" 的指代就全乱了。
 
-浏览器里看：`http://127.0.0.1:3080/dsh-memory/state`（JSON 概览）、
+浏览器里看：`http://<host>:<port>/dsh-memory/state`（JSON 概览）、
 `/dsh-memory/text`（纯文本全量）。需要同一浏览器的登录态。
 
 ## 为什么结尾必须去掉 `{{`
@@ -86,7 +86,7 @@ $DSH_HOME/diary/state.json         # { lastId: n } —— id 下限，删了也�
 `interpolate: false` 退出开关（只有 `PromptSection` 有）。记忆正文是任意的，一条带 `{{`
 的记录会让每次提示词组装抛错——整个进程的请求全挂。所以进提示词之前把 `{{` 换成 `{ {`。
 
-## 两个模型，一条线路
+## 两个模型，一条流程
 
 记忆的**整理**不占用主模型的脑子，交给一个专门的记忆模型（`deepseek-flash`，api.deepseek.com，
 OpenAI 协议）。主模型只管干活和汇报。

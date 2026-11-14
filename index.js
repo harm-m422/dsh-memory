@@ -49,6 +49,9 @@ import { appendFileSync, chmodSync, existsSync, mkdirSync, readFileSync, renameS
 import { createHash } from 'node:crypto'
 import { isSealed, open as openSealed, seal, KEY_PATH as VAULT_KEY_PATH } from './vault.js'
 import { organise, consolidate, converse, extractSearchTerms, useHarnessLlm, usesHarnessModel, modelReady, readConfig, writeConfig, readStats, KEY_PATH, CONFIG_PATH, STATS_PATH, MODEL_FALLBACK } from './model.js'
+import { archiveSession, archiveSummary, searchArchives, listSessions as listArchivableSessions } from './archive.js'
+import { FACETS, FACET_LABEL, SUBJECTS, readPersona, writePersona, addFacet, mergePersona, distill as distillPersona, personaText, personaSummary } from './persona.js'
+import { VIVID_KINDS, addVivid, maybeSurfaceVivid, vividSummary } from './vivid.js'
 
 /** Cordis plugin name. */
 const name = 'dsh-memory'
@@ -63,6 +66,11 @@ const ENTRIES = DIR + '/entries.jsonl'
 const STATE = DIR + '/state.json'
 const BINDINGS = DIR + '/bindings.json'
 const PREFIX = '/dsh-memory'
+// 版本号只写在一个地方：package.json。握手表里的版本曾常年停在 1.1.1，
+// 于是「二选一」弹窗里标准版显示的是个假版本。
+const VERSION = (() => {
+  try { return String(JSON.parse(readFileSync(new URL('./package.json', import.meta.url), 'utf8')).version ?? '0.0.0') } catch { return '0.0.0' }
+})()
 
 /** Hard ceiling on the whole memory block, in characters. */
 const MAX_CONTEXT = 1800
@@ -773,8 +781,8 @@ function tierOfEntry(entry) {
  */
 /**
  * Split a query into search tokens. A query is treated as a bag of words, not a
- * phrase: "部署 失败" should recall an entry that says "deploy 超时" and another
- * that says "只失败过一次", which a single substring test cannot do.
+ * phrase: two words given together should recall an entry that matches either one,
+ * and another that matches the other — which a single substring test cannot do.
  */
 function tokensOf(text) {
   const parts = String(text ?? '')
@@ -836,7 +844,31 @@ function crossScopeWarning(sessionId, scopes) {
     + '」，不属于本会话绑定的档。先问用户是不是问错了档；确认要跨档之后再继续。\n\n'
 }
 
+/**
+ * The memory block, plus the two layers that are not four-domain: the eight-facet
+ * persona (what I make of this person and of myself) and the occasional vivid
+ * memory that surfaces on its own.
+ */
 function memoryText(context) {
+  const agent = context === undefined || context === null ? undefined : context.agent
+  const sessionId = agent !== undefined && agent !== null && typeof agent.id === 'string' ? agent.id : ''
+  if (isDisabled(sessionId)) return ''
+  const base = memoryTextBase(context)
+  const extra = extrasText()
+  if (extra.length === 0) return base
+  return base.length > 0 ? base + '\n\n' + extra : extra
+}
+
+function extrasText() {
+  const parts = []
+  const persona = personaText(2)
+  if (persona.length > 0) parts.push(persona)
+  const vivid = maybeSurfaceVivid()
+  if (vivid.length > 0) parts.push(vivid)
+  return parts.join('\n\n')
+}
+
+function memoryTextBase(context) {
   const agent = context === undefined || context === null ? undefined : context.agent
   const sessionId = agent !== undefined && agent !== null && typeof agent.id === 'string' ? agent.id : ''
   // An opted-out session gets no memory block at all: no remembered facts, no
@@ -1106,6 +1138,22 @@ async function handle(ctx, req, res) {
     return
   }
 
+  if (req.method === 'GET' && path === PREFIX + '/persona') {
+    send(res, 200, { ...personaSummary(), text: personaText(12) })
+    return
+  }
+
+  if (req.method === 'GET' && path === PREFIX + '/vivid') {
+    send(res, 200, vividSummary())
+    return
+  }
+
+  if (req.method === 'GET' && path === PREFIX + '/archive') {
+    const q = url.searchParams.get('q') ?? ''
+    send(res, 200, q.length > 0 ? { query: q, hits: searchArchives(q, 12) } : archiveSummary())
+    return
+  }
+
   if (req.method === 'GET' && path === PREFIX + '/text') {
     const facts = readFacts()
     const entries = readEntries().filter(isLive)
@@ -1261,7 +1309,7 @@ function sealExisting() {
   }
 }
 
-function apply(ctx) {
+function applyInner(ctx) {
   // 没有自己的 key 时借用 harness 的模型：harness 已经登录好了
   try { useHarnessLlm(ctx.get('llm') ?? null) } catch { useHarnessLlm(null) }
   // Sign into the shared engine table so a second memory engine can notice us.
@@ -1270,7 +1318,7 @@ function apply(ctx) {
   ctx.effect(() => {
     const key = Symbol.for('dsh.memory.engines')
     if (globalThis[key] === undefined) globalThis[key] = {}
-    globalThis[key]['dsh-memory'] = { kind: 'memory', version: '1.1.1', at: Date.now() }
+    globalThis[key]['dsh-memory'] = { kind: 'memory', version: VERSION, at: Date.now() }
     return () => { delete globalThis[key]['dsh-memory'] }
   }, 'dsh-memory.handshake')
   mkdirSync(DIR, { recursive: true })
@@ -1289,9 +1337,12 @@ function apply(ctx) {
     name: 'memory:pipeline',
     order: 700,
     text: [
-      '记忆线路（本插件的固定流程，不是可选建议）：',
+      '记忆流程（本插件的固定流程，不是可选建议）：',
       '· 每轮给出最终回复之前，先调 memory_report，把这一轮实际做了什么交给记忆模型——它负责整理成一级记忆。顺序不能颠倒：记忆模型先知道，你再汇报。',
       '· 遇到决定性结论、硬教训、或方向改变，用 memory_promote 让它深度整理成二级记忆；日常进展不要用它。',
+      '· 完整对话用 memory_archive 归档、用 memory_recall 按记得的词回查：四域记结论，档案记原文。',
+      '· 想留一句对人的印象，用 memory_persona 的 add，写明 who=you（对方）还是 who=me（你自己）。',
+      '· 遇到值得日后忽然想起的事，用 memory_vivid 记一条（interesting / awkward）。',
       '· 如果记忆块出现「本会话：尚未写入过记忆」，这一轮必须写入至少一条（memory_write / memory_fact / memory_promote 都算）。',
       '· 如果记忆块列出某个档「从未写入」或「距上次写入超过 48 小时」，这一轮必须为它写入一条。确实无内容可记时，说明为什么，不要用填充条目凑数。',
       '· 两步都是软失败：记忆模型不可用时照常回答，但要说明这一轮没有整理，不要假装记下了。',
@@ -1767,11 +1818,136 @@ function apply(ctx) {
     }
   }), 'dsh-memory.promote')
 
+  // ── 档案：四域记结论，这里记原文 ─────────────────────────────────────────
+  // 格式与 dsh-memory-acc 完全一致，两个引擎共用同一份档案，换引擎不用搬数据。
+  // ── 八面性格：印象，不是档案条文 ─────────────────────────────────────────
+  ctx.effect(() => ctx.tools.register({
+    name: 'memory_persona',
+    description: 'Read or add to the eight-facet profile of the person you talk with (and of yourself): temper, mouth, affinity, habits, likes, manner, style, ability. Reading is local and free. Adding one observation writes a single line into one facet of one person.',
+    parameters: {
+      type: 'object',
+      properties: {
+        action: { type: 'string', enum: ['read', 'add'], description: 'read the profile, or add one observation.' },
+        who: { type: 'string', enum: SUBJECTS, description: 'you = the human, me = this model. Defaults to you.' },
+        facet: { type: 'string', enum: FACETS, description: 'Which facet an added observation belongs to.' },
+        text: { type: 'string', description: 'The observation, up to 120 characters.' }
+      }
+    },
+    output: { schema: { type: 'string' }, render(_a, v) { return [{ type: 'text', text: String(v) }] } },
+    async execute(args) {
+      const input = args ?? {}
+      if (input.action === 'add') {
+        if (!FACETS.includes(input.facet)) throw new Error('facet must be one of ' + FACETS.join(', '))
+        const text = String(input.text ?? '').trim()
+        if (text.length === 0) throw new Error('text is required')
+        const subject = input.who === 'me' ? 'me' : 'you'
+        const next = writePersona(addFacet(readPersona(), subject, input.facet, text.slice(0, 120)))
+        return '已记入「' + (subject === 'me' ? '我' : '你') + '·' + FACET_LABEL[input.facet] + '」：' + text + '（共 ' + next[subject][input.facet].length + ' 条）'
+      }
+      const persona = readPersona()
+      const lines = []
+      for (const subject of SUBJECTS) {
+        const title = subject === 'you' ? '你' : '我'
+        const parts = []
+        for (const facet of FACETS) {
+          if (persona[subject][facet].length === 0) continue
+          parts.push(FACET_LABEL[facet] + '：' + persona[subject][facet].join('；'))
+        }
+        if (parts.length > 0) lines.push('【' + title + '】\n' + parts.join('\n'))
+      }
+      return lines.length === 0 ? '性格档案还是空的。' : lines.join('\n\n')
+    }
+  }), 'dsh-memory.persona')
+
+  // ── 恍惚：会自己浮上来的记忆 ─────────────────────────────────────────────
+  ctx.effect(() => ctx.tools.register({
+    name: 'memory_vivid',
+    description: 'Record today\'s notable moment: something genuinely interesting that happened, or something awkward. These are the ones that come back on their own later, so only keep the ones worth being interrupted by.',
+    parameters: {
+      type: 'object',
+      properties: {
+        kind: { type: 'string', enum: VIVID_KINDS, description: 'interesting or awkward' },
+        text: { type: 'string', description: 'One moment, up to 240 characters.' }
+      },
+      required: ['kind', 'text']
+    },
+    output: { schema: { type: 'string' }, render(_a, v) { return [{ type: 'text', text: String(v) }] } },
+    async execute(args) {
+      const input = args ?? {}
+      const next = addVivid(input.kind, input.text)
+      return '记下了（' + (input.kind === 'awkward' ? '尴尬' : '有意思') + '，共 ' + next.entries.length + ' 条）'
+    }
+  }), 'dsh-memory.vivid')
+
+  ctx.effect(() => ctx.tools.register({
+    name: 'memory_archive',
+    description: 'Archive a complete conversation verbatim from the session log — every user message, assistant turn, tool call and result — into the memory directory. The log itself is never modified. Use it to keep an old session, or with list:true to see what is archivable.',
+    parameters: {
+      type: 'object',
+      properties: {
+        session: { type: 'string', description: 'Session id to archive. Omit for the newest session.' },
+        list: { type: 'boolean', description: 'Only list archivable sessions, do not write anything.' },
+        images: {
+          type: 'array',
+          description: 'Descriptions of images you actually looked at, so the archive keeps what they showed after the files are gone.',
+          items: { type: 'object', properties: { id: { type: 'string' }, text: { type: 'string' } }, required: ['id', 'text'] }
+        }
+      }
+    },
+    output: { schema: { type: 'string' }, render(_a, v) { return [{ type: 'text', text: String(v) }] } },
+    async execute(args) {
+      const input = args ?? {}
+      if (input.list === true) {
+        const all = listArchivableSessions()
+        if (all.length === 0) return '没有找到任何会话日志（' + HOME + '/sessions）。'
+        return all.slice(0, 20).map((s) => s.session + '  ' + (s.bytes / 1024).toFixed(0) + ' KB  ' + new Date(s.mtime).toISOString().slice(0, 10)).join('\n')
+      }
+      const result = archiveSession({ session: typeof input.session === 'string' ? input.session : '', images: input.images })
+      if (result.ok !== true) return '归档失败：' + result.error
+      const counts = Object.entries(result.counts).map(([k, v]) => k + ' ' + v).join(' · ')
+      return '已归档 ' + result.session + '\n  事件 ' + result.events + ' → 保留 ' + result.kept + ' 条（' + counts + '）\n  ' + result.dir + '\n  ' + result.file + ' + manifest.json'
+    }
+  }), 'dsh-memory.archive')
+
+  ctx.effect(() => ctx.tools.register({
+    name: 'memory_recall',
+    description: 'Search the archived conversations by a handful of words you remember — the exact phrase is not required. Returns the matching turns with the session they came from, newest and best first. Use memory_archive first if a session was never archived.',
+    parameters: {
+      type: 'object',
+      properties: {
+        q: { type: 'string', description: 'A few words you remember, space separated.' },
+        limit: { type: 'number', description: 'How many turns to return. Default 8.' }
+      },
+      required: ['q']
+    },
+    output: { schema: { type: 'string' }, render(_a, v) { return [{ type: 'text', text: String(v) }] } },
+    async execute(args) {
+      const hits = searchArchives(String(args?.q ?? ''), Number(args?.limit ?? 8))
+      if (hits.length === 0) return '没有命中。可能这段对话还没归档，先调 memory_archive。'
+      return hits.map((h) => '[' + h.session.slice(0, 14) + '…] ' + String(h.at ?? '').slice(0, 16) + ' ' + h.role + '\n' + h.text.slice(0, 600)).join('\n\n---\n\n')
+    }
+  }), 'dsh-memory.recall')
+
   ctx.effect(() => ctx.webServer.register({
     kind: 'prefix',
     path: PREFIX,
     handler: (req, res) => handle(ctx, req, res)
   }), 'dsh-memory.routes')
+}
+
+/**
+ * 启动期绝不向外抛：插件 apply() 抛错会让 DSH 判定「没激活」，整个 web boot 停在
+ * "Failed to load plugins"，用户连界面都进不去。记忆插件没有资格拖垮别的功能，
+ * 所以这里吞掉异常、留日志，插件保持已加载但不工作——这比让 harness 起不来强。
+ * 剩下的风险只有「模块本身导入失败」（语法错误、缺文件），那类只能靠外部守护兜底。
+ */
+function apply(ctx) {
+  try {
+    applyInner(ctx)
+  } catch (error) {
+    try { ctx.logger?.error?.('dsh-memory: apply failed; plugin stays loaded but inert', error) } catch { /* 日志不许再抛 */ }
+    try { console.error('dsh-memory: apply failed', error) } catch { /* 同上 */ }
+  }
 }
 
 export { name, inject, apply }
