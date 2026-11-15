@@ -411,6 +411,75 @@ window.__ModuleLoader__.load({
 					scopesOpen ? h("div", { style: { marginTop: 8 } }, scopeRows) : null,
 					h(Muted, null, "隐藏过 " + (panel.hidden || 0) + " 条（可恢复）")),
 
+				h(Section, { title: "做梦" },
+					(panel.dream === null || panel.dream === undefined)
+						? h(Muted, null, "做梦模块没装：dream.js 缺失或加载失败，记忆本身不受影响。")
+						: (function () {
+							var d = panel.dream;
+							var tidy = d.config.tidy;
+							var practice = d.config.practice;
+							var st = d.state;
+							function setDream(query) {
+								fetch("/dsh-dream/config?" + query, { method: "POST", credentials: "same-origin" })
+									.then(function () { load(); })
+									.catch(function (error) { setNote("改不了：" + String((error && error.message) || error)); });
+							}
+							function runDream(what) {
+								setNote(what === "practice" ? "正在练…（几十秒到一分钟）" : "正在整理…");
+								fetch("/dsh-dream/run?what=" + what, { method: "POST", credentials: "same-origin" })
+									.then(function (r) { return r.json(); })
+									.then(function (body) {
+										if (body && body.ok) setNote("做完了：" + ((body.steps || []).join(" · ") || "完成"));
+										else setNote("没做成：" + (((body && body.errors) || []).join("；") || "未知原因"));
+										load();
+									})
+									.catch(function (error) { setNote("失败：" + String((error && error.message) || error)); });
+							}
+							function chip(label, active, onClick) {
+								return h("button", {
+									key: "c-" + label,
+									onClick: onClick,
+									style: active ? Object.assign({}, buttonStyle, { background: ACCENT, color: "#fff", border: "none" }) : buttonStyle
+								}, label);
+							}
+							var nextAt = st.practice.nextAt > 0 ? new Date(st.practice.nextAt) : null;
+							var nextText = nextAt === null
+								? "还没排"
+								: (nextAt.getMonth() + 1) + "-" + nextAt.getDate() + " " + String(nextAt.getHours()).padStart(2, "0") + ":" + String(nextAt.getMinutes()).padStart(2, "0");
+							var lessonRows = (d.experience || []).map(function (row, index) {
+								return h("div", { key: "e" + index, style: { fontSize: 12, color: SOFT, padding: "2px 0" } }, "· " + row.text);
+							});
+							return h("div", null,
+								h("div", { style: { display: "flex", gap: 6, alignItems: "center", marginBottom: 8, flexWrap: "wrap" } },
+									h("span", { style: { fontSize: 12, color: DIM, minWidth: 64 } }, "整理梦"),
+									chip("开", tidy.enabled, function () { setDream("tidy=1"); }),
+									chip("关", !tidy.enabled, function () { setDream("tidy=0"); }),
+									h("span", { style: { fontSize: 12, color: DIM, marginLeft: 10 } }, "每周"),
+									[1, 2, 3, 4].map(function (n) { return chip(String(n), tidy.perWeek === n, function () { setDream("perWeek=" + n); }); }),
+									h("span", { style: { fontSize: 11, color: DIM } }, "本周 " + (st.tidy.count || 0) + " 次")),
+								h("div", { style: { display: "flex", gap: 6, alignItems: "center", marginBottom: 8, flexWrap: "wrap" } },
+									h("span", { style: { fontSize: 12, color: DIM, minWidth: 64 } }, "练习梦"),
+									chip("开", practice.enabled, function () { setDream("practice=1"); }),
+									chip("关", !practice.enabled, function () { setDream("practice=0"); }),
+									h("span", { style: { fontSize: 12, color: DIM, marginLeft: 10 } }, "每"),
+									[7, 10, 14, 30].map(function (n) { return chip(n + " 天", practice.everyDays === n, function () { setDream("everyDays=" + n); }); })),
+								h("div", { style: { display: "flex", gap: 10, alignItems: "center", marginBottom: 8, flexWrap: "wrap" } },
+									h("span", { style: { fontSize: 12, color: DIM, minWidth: 64 } }, "下次练习"),
+									h("span", { style: { fontSize: 12 } }, nextText),
+									h("span", { style: { fontSize: 11, color: DIM } }, "预算 " + Math.round((practice.budget || 0) / 10000) + " 万 tokens / 次")),
+								h("div", { style: { display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 6 } },
+									h("button", { onClick: function () { runDream("tidy"); }, style: buttonStyle }, "现在整理"),
+									h("button", { onClick: function () { runDream("practice"); }, style: buttonStyle }, "现在练一次")),
+								lessonRows.length > 0
+									? h("div", null,
+										h("div", { style: { fontSize: 12, color: DIM, marginTop: 6 } }, "练手记下的（来自模拟，不是事实）"),
+										lessonRows)
+									: null,
+								h(Muted, null,
+									"整理梦重建索引并合并重复；练习梦只在非上班时段（工作日 9–12 / 14–18 之外）、负载低于一半、且 harness 空闲时开始。",
+									d.gate && d.gate.ok === false && practice.enabled ? " 现在不能练：" + d.gate.why + "。" : ""));
+						})()),
+
 				h(Section, { title: "和记忆模型说话" },
 					h("div", {
 						style: {

@@ -52,6 +52,7 @@ import { organise, consolidate, converse, extractSearchTerms, useHarnessLlm, use
 import { archiveSession, archiveSummary, searchArchives, listSessions as listArchivableSessions } from './archive.js'
 import { FACETS, FACET_LABEL, SUBJECTS, readPersona, writePersona, addFacet, mergePersona, distill as distillPersona, personaText, personaSummary } from './persona.js'
 import { VIVID_KINDS, addVivid, maybeSurfaceVivid, vividSummary } from './vivid.js'
+import { installDream } from './dream.js'
 
 /** Cordis plugin name. */
 const name = 'dsh-memory'
@@ -73,9 +74,12 @@ const VERSION = (() => {
 })()
 
 /** Hard ceiling on the whole memory block, in characters. */
-const MAX_CONTEXT = 1800
+const MAX_CONTEXT = 2400
 /** One line of a world fact. */
 const WORLD_LINE = 90
+// 性格档是"我是谁"，不是"这件事的结论"。按 WORLD_LINE 只给 90 字，模型永远
+// 看不到【毛病】【底线】那半截——等于写了一份自己读不到的人设。
+const PERSONA_LINE = 700
 /** One line of a scoped fact. */
 const SCOPE_LINE = 130
 /** One line of a remembered log entry. */
@@ -251,6 +255,9 @@ function storedEntry(entry) {
  * Tamper detection must never destroy the evidence it is detecting.
  */
 let unreadableLines = []
+
+// 做梦模块装好后把「按偏移读命中行」的通道挂在这里；没装就是 null，走老路。
+let dreamBridge = null
 
 /** Serialise a log, keeping unreadable lines byte-identical at the end. */
 function serializeEntries(entries) {
@@ -897,7 +904,7 @@ function memoryTextBase(context) {
     for (const fact of facts) {
       if (tierOfFact(fact) !== tier || !factVisible(fact.scope)) continue
       const where = fact.scope === 'world' ? '' : scopeLabel(fact.scope) + ' '
-      const room = tier === 'persona' ? WORLD_LINE : SCOPE_LINE
+      const room = tier === 'persona' ? PERSONA_LINE : SCOPE_LINE
       lines.push('· ' + where + (fact.slot === 'charter' ? '只管' : String(fact.doc.title ?? fact.slot)) + '：' + oneLine(clip(fact.doc.text, room)))
     }
     if (tier === 'note' || tier === 'ephemeral') {
@@ -1008,7 +1015,7 @@ function digestForPanel(message) {
   const lines = ['【事实】']
   for (const fact of readFacts()) {
     lines.push('[' + fact.scope + '/' + fact.slot + ']（' + tierOfFact(fact) + '）'
-      + String(fact.doc.title ?? fact.slot) + '：' + clip(oneLine(fact.doc.text), 220))
+      + String(fact.doc.title ?? fact.slot) + '：' + clip(oneLine(fact.doc.text), 800))
   }
   lines.push('', '【日志】')
   for (const entry of readEntries().filter(isLive).slice(-12)) {
@@ -1184,7 +1191,16 @@ async function handle(ctx, req, res) {
       facts: readFacts().length,
       entries: entries.filter(isLive).length,
       hidden: entries.length - entries.filter(isLive).length,
-      unreadable: unreadableLines.length
+      unreadable: unreadableLines.length,
+      // 做梦模块没装就是 null，面板据此刻不出来。
+      dream: dreamBridge === null
+        ? null
+        : {
+            config: dreamBridge.config(),
+            state: dreamBridge.state(),
+            gate: dreamBridge.practiceGate(Date.now()),
+            experience: dreamBridge.readExperiences(3)
+          }
     })
     return
   }
@@ -1438,6 +1454,8 @@ function applyInner(ctx) {
     async execute(args, exec) {
       const input = args ?? {}
       const sessionId = sessionOf(exec)
+      // 不要在这里走索引：索引是拿 60 字摘要建的词表，查不到正文里的词。
+      // 实测 5000 条全量 parse 只有 5ms，省这 2ms 换来漏检不划算。
       const all = readEntries()
       const scope = (input.scope === undefined || input.scope === null || input.scope === '') ? '' : normaliseScope(input.scope, sessionId)
       let list = input.includeDeleted === true ? all : all.filter(isLive)
@@ -1636,11 +1654,13 @@ function applyInner(ctx) {
     parameters: {
       type: 'object',
       properties: {
-        action: { type: 'string', enum: ['read', 'write', 'delete'], description: 'read returns full text; write creates or replaces one slot; delete removes one slot.' },
+        action: { type: 'string', enum: ['read', 'write', 'delete', 'edit'], description: 'read returns full text; write creates or replaces one slot; edit replaces one exact snippet inside a slot (keeps the rest byte-for-byte); delete removes one slot.' },
         scope: { type: 'string', description: 'world = everyone, always (agent = my character, user = your character, system = how this harness is built). topic:name = one line of work. file:path = one file. session:current = this conversation. Defaults to world; omit on read to return everything.' },
         slot: { type: 'string', description: 'Document id within the scope: lowercase letters, digits and dashes, up to 24 characters.' },
         title: { type: 'string', description: 'Display name, e.g. 我 or 你. Kept from the previous revision when omitted on write.' },
         text: { type: 'string', description: 'Required on write, up to ' + String(MAX_TEXT) + ' characters. World facts show only their first 90 characters in the prompt, scoped facts 130 — lead with what matters.' },
+        find: { type: 'string', description: 'Only for action=edit: the exact snippet to replace. It must appear exactly once in the current text, otherwise nothing changes.' },
+        replace: { type: 'string', description: 'Only for action=edit: what takes its place. Empty string deletes the snippet.' },
         as: { type: 'string', description: 'Optional display name for yourself in the byline.' }
       },
       required: ['action']
@@ -1669,6 +1689,29 @@ function applyInner(ctx) {
       const scope = normaliseScope(rawScope, sessionId)
       const key = factKey(scope, slot)
       const map = factMap()
+
+      if (action === 'edit') {
+        // 改一句话不该把整条重写一遍：整条替换一旦传进来的是半截，后半段就没了。
+        // 这里按"原文里唯一的一段"替换，其余字节原样写回。
+        const doc = map[key]
+        if (doc === undefined || doc === null || typeof doc !== 'object') return '没有 [' + scope + '/' + slot + '] 这条事实。'
+        const find = typeof input.find === 'string' ? input.find : ''
+        const replace = typeof input.replace === 'string' ? input.replace : ''
+        if (find.length === 0) throw new Error('edit 需要 find：要替换的那段原文')
+        const current = typeof doc.text === 'string' ? doc.text : null
+        if (current === null) return '这条读不出来（密钥不对），没动。'
+        let count = 0
+        let at = current.indexOf(find)
+        while (at >= 0) { count += 1; at = current.indexOf(find, at + find.length) }
+        if (count === 0) return '原文里没有这段，没动。'
+        if (count > 1) throw new Error('这段在原文里出现 ' + count + ' 次，会改错地方；给更长的上下文再来')
+        const index = current.indexOf(find)
+        const nextText = current.slice(0, index) + replace + current.slice(index + find.length)
+        const { sealedText, ...rest } = doc
+        map[key] = { ...rest, text: nextText, updatedAt: new Date().toISOString() }
+        writeFacts(map)
+        return '已改 [' + scope + '/' + slot + ']：1 处替换，全文 ' + String(current.length) + ' → ' + String(nextText.length) + ' 字（上一版在 ' + FACTS + '.bak）'
+      }
 
       if (action === 'delete') {
         if (map[key] === undefined) return '没有 [' + scope + '/' + slot + '] 这条事实。'
@@ -1947,6 +1990,12 @@ function apply(ctx) {
   } catch (error) {
     try { ctx.logger?.error?.('dsh-memory: apply failed; plugin stays loaded but inert', error) } catch { /* 日志不许再抛 */ }
     try { console.error('dsh-memory: apply failed', error) } catch { /* 同上 */ }
+  }
+  // 做梦是旁路：装不上也只是没有梦，记忆本身必须照常工作。
+  try {
+    dreamBridge = installDream(ctx, { dir: DIR, readEntries, writeEntries, llm: ctx.llm, log: ctx.logger })
+  } catch (error) {
+    try { ctx.logger?.warn?.('dsh-memory: dream module not installed', error) } catch { /* 日志不许再抛 */ }
   }
 }
 

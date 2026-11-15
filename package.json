@@ -1,6 +1,6 @@
 {
   "name": "dsh-memory",
-  "version": "1.4.0",
+  "version": "2.0.3",
   "private": true,
   "type": "module",
   "description": "A scoped memory model shared by every agent: world facts, topic lines, file work records, and the current session's direction.",
@@ -34,6 +34,7 @@
     "locale/*.json",
     "persona.js",
     "vivid.js",
+    "dream.js",
     "LICENSE",
     "NOTICE"
   ],
